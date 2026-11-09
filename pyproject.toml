@@ -8,7 +8,9 @@ authors = [
     { name = "dave-finlay", email = "davefinlay+github@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "gymnasium[classic-control]>=1.4.0",
+]
 
 [tool.uv]
 # Experiments are scripts in their own directories, not an installable package.

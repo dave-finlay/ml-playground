@@ -13,7 +13,9 @@ level once there's a second user for it.
 
 ## Experiments
 
-None yet.
+| Directory | What's in it |
+|---|---|
+| [cartpole](cartpole/README.md) | CartPole: so far, watching the pole fall with no control |
 
 ## Setup
 
@@ -31,4 +33,6 @@ less than a week old.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE), except files whose header says otherwise. Code copied
+from elsewhere keeps its original license, and its header says where it
+came from.
