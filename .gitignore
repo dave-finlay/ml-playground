@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.iml
+.idea/
+.DS_Store
+
+# Training outputs: checkpoints, logs, recorded videos, downloaded datasets
+runs/
+checkpoints/
+videos/
+data/

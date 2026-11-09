@@ -1,0 +1,19 @@
+[project]
+name = "ml-playground"
+version = "0.1.0"
+description = "Small machine-learning experiments, built up one at a time, starting with reinforcement learning"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "dave-finlay", email = "davefinlay+github@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+# Experiments are scripts in their own directories, not an installable package.
+package = false
+# Don't take package releases less than a week old: supply-chain attacks
+# are usually caught and pulled within hours. To take an urgent fix
+# sooner, allow just that package with --exclude-newer-package.
+exclude-newer = "7 days"
