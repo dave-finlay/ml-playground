@@ -8,7 +8,7 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   - none: always 0 N, so the pole just falls
   - p: proportional to the pole angle, up to a maximum force
   - pd: proportional to the pole angle plus its rate of change, and
-    optionally a term proportional to the cart's position
+    optionally terms on the cart's position and velocity
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -24,7 +24,7 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --controller p --kp 20
     uv run python cartpole/cartpole.py --controller p --angle-noise 1 --angle-offset 1
     uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
-    uv run python cartpole/cartpole.py --controller pd --kx 0.5 --max-steps 3000
+    uv run python cartpole/cartpole.py --controller pd --kx 0.5 --kv 1 --max-steps 3000
 """
 
 import argparse
@@ -194,38 +194,88 @@ class PController:
         return clamp(self.kp * theta, self.max_force)
 
 
-class PDController:
-    """Proportional-derivative controller on the pole angle.
+class Differencer:
+    """Estimates the rate of change of a sampled value from successive
+    samples: (value now - previous value) / dt.
 
-    Pushes with kp * angle + kd * (rate of change of the angle), capped at
-    max_force newtons either way. kp is in newtons per radian, kd in
-    newtons per radian per second. The D term resists the pole's motion,
+    Returns 0 for the first sample, when there's no previous one.
+    """
+
+    def __init__(self, dt):
+        self.dt = dt
+        self._previous = None
+
+    def update(self, value):
+        """Take the next sample and return the estimated rate of change."""
+        rate = 0.0 if self._previous is None else (value - self._previous) / self.dt
+        self._previous = value
+        return rate
+
+
+class Smoother:
+    """Exponential moving average of a sampled value:
+        smoothed = smoothing * previous smoothed + (1 - smoothing) * value
+
+    smoothing runs from 0 (no smoothing) to just under 1 (heavy). Higher
+    values cut noise more but respond later. The first sample passes
+    through unchanged.
+    """
+
+    def __init__(self, smoothing=0.0):
+        if not 0.0 <= smoothing < 1.0:
+            raise ValueError(f"smoothing must be from 0 to under 1: {smoothing}")
+        self.smoothing = smoothing
+        self._smoothed = None
+
+    def update(self, value):
+        """Take the next sample and return the smoothed value."""
+        if self._smoothed is None:
+            self._smoothed = value
+        else:
+            self._smoothed = (
+                self.smoothing * self._smoothed + (1.0 - self.smoothing) * value
+            )
+        return self._smoothed
+
+
+class PDController:
+    """Proportional-derivative controller on the pole angle and, optionally,
+    the cart position.
+
+    Pushes with
+        kp * angle + kd * (angle's rate of change)
+        + kx * (cart position) + kv * (cart velocity)
+    capped at max_force newtons either way.
+
+    The angle terms balance the pole. kp is in newtons per radian, kd in
+    newtons per radian per second. The kd term resists the pole's motion,
     damping the swings that P control alone leaves.
 
-    rate_from says where the rate of change comes from:
-    - "difference": estimated from successive angle readings,
-      (angle now - previous angle) / dt, as you would with only an angle
-      sensor. It's 0 on the first step, when there's no previous reading.
-    - "velocity": the angular velocity in the state, as if from a perfect
-      rate sensor (gyroscope).
+    The cart terms keep the cart near the centre; both default to 0. kx is
+    in newtons per metre, kv in newtons per metre per second. Positive
+    values are the useful direction, and it's counter-intuitive: with the
+    cart right of centre, kx pushes the cart further right. That tips the
+    pole left, and the angle terms then drive the cart back left, toward
+    the centre. Pushing straight back toward the centre tips the pole the
+    wrong way and makes the cart run away. kv damps the cart's motion the
+    way kd damps the pole's: without it, kx leaves the cart swinging back
+    and forth through the centre, with slowly growing swings. Too much kv
+    fails too (above about 2 N·s/m with kp = 20, kd = 3): it undoes the
+    damping of the pole's swing.
 
-    kx (newtons per metre, default 0) adds kx * (cart position) to keep
-    the cart near the centre. A positive kx is the useful direction, and
-    it's counter-intuitive: with the cart right of centre, it pushes the
-    cart further right. That tips the pole left, and the angle terms then
-    drive the cart back left, toward the centre. A negative kx, pushing
-    straight back toward the centre, tips the pole the wrong way and
-    makes the cart run away.
+    rate_from says where both rates (the angle's and the cart's) come from:
+    - "difference": estimated from successive readings, as you would with
+      only angle and position sensors (see Differencer)
+    - "velocity": the velocities in the state, as if from perfect rate
+      sensors
 
-    smoothing (0 to just under 1) smooths the rate with an exponential
-    moving average before it's used:
-        smoothed = smoothing * previous smoothed + (1 - smoothing) * rate
-    0 means no smoothing. Higher values cut noise more but respond later,
-    and late damping is weaker damping.
+    smoothing (0 to just under 1) smooths both rates with an exponential
+    moving average before they're used (see Smoother). Late damping is
+    weaker damping, so too much smoothing brings swings back.
 
     dt is the time between readings in seconds (CartPole.tau). A
-    PDController remembers the previous reading and smoothed rate, so use
-    a new one for each episode.
+    PDController remembers previous readings and smoothed rates, so use a
+    new one for each episode.
     """
 
     def __init__(
@@ -237,37 +287,29 @@ class PDController:
         rate_from="difference",
         smoothing=0.0,
         kx=0.0,
+        kv=0.0,
     ):
         if rate_from not in ("difference", "velocity"):
             raise ValueError(f"unknown rate_from: {rate_from!r}")
-        if not 0.0 <= smoothing < 1.0:
-            raise ValueError(f"smoothing must be from 0 to under 1: {smoothing}")
         self.kp = kp
         self.kd = kd
-        self.dt = dt
+        self.kx = kx
+        self.kv = kv
         self.max_force = max_force
         self.rate_from = rate_from
-        self.smoothing = smoothing
-        self.kx = kx
-        self._previous_theta = None
-        self._smoothed_rate = None
+        self._theta_differencer = Differencer(dt)
+        self._x_differencer = Differencer(dt)
+        self._theta_rate_smoother = Smoother(smoothing)
+        self._x_rate_smoother = Smoother(smoothing)
 
     def __call__(self, state):
-        x, _, theta, theta_dot = state
+        x, x_dot, theta, theta_dot = state
         if self.rate_from == "difference":
-            if self._previous_theta is None:
-                theta_dot = 0.0
-            else:
-                theta_dot = (theta - self._previous_theta) / self.dt
-            self._previous_theta = theta
-        if self._smoothed_rate is None:
-            self._smoothed_rate = theta_dot
-        else:
-            self._smoothed_rate = (
-                self.smoothing * self._smoothed_rate
-                + (1.0 - self.smoothing) * theta_dot
-            )
-        force = self.kp * theta + self.kd * self._smoothed_rate + self.kx * x
+            theta_dot = self._theta_differencer.update(theta)
+            x_dot = self._x_differencer.update(x)
+        theta_rate = self._theta_rate_smoother.update(theta_dot)
+        x_rate = self._x_rate_smoother.update(x_dot)
+        force = self.kp * theta + self.kd * theta_rate + self.kx * x + self.kv * x_rate
         return clamp(force, self.max_force)
 
 
@@ -351,6 +393,33 @@ def print_summary(states, tau, angle_limit, track_limit):
     print(f"Stopped after {t:.2f} s ({steps} steps of {tau} s): {reason}.")
 
 
+# Options that only some controllers use: option name -> (controllers
+# that use it, default). Given with any other controller, it's an error
+# rather than being silently ignored.
+CONTROLLER_OPTIONS = {
+    "kp": (("p", "pd"), 20.0),
+    "max_force": (("p", "pd"), 10.0),
+    "kd": (("pd",), 3.0),
+    "rate_from": (("pd",), "difference"),
+    "d_smoothing": (("pd",), 0.0),
+    "kx": (("pd",), 0.0),
+    "kv": (("pd",), 0.0),
+}
+
+
+def apply_controller_options(parser, args):
+    """Reject controller options the chosen controller doesn't use, and fill
+    in defaults for the ones it does."""
+    for name, (controllers, default) in CONTROLLER_OPTIONS.items():
+        value = getattr(args, name)
+        if value is None:
+            setattr(args, name, default)
+        elif args.controller not in controllers:
+            option = "--" + name.replace("_", "-")
+            needs = " or ".join(f"--controller {c}" for c in controllers)
+            parser.error(f"{option} needs {needs}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -375,44 +444,51 @@ def parse_args():
     parser.add_argument(
         "--kp",
         type=float,
-        default=20.0,
+        default=None,  # see CONTROLLER_OPTIONS
         help="p and pd controllers' proportional gain, in newtons per radian of "
         "lean (default: 20)",
     )
     parser.add_argument(
         "--kd",
         type=float,
-        default=3.0,
+        default=None,  # see CONTROLLER_OPTIONS
         help="pd controller's derivative gain, in newtons per radian per second "
         "(default: 3)",
     )
     parser.add_argument(
         "--rate-from",
         choices=["difference", "velocity"],
-        default="difference",
-        help="where the pd controller gets the angle's rate of change: "
-        "difference of successive angle readings, or the true angular "
-        "velocity, like a perfect gyroscope (default: difference)",
+        default=None,  # see CONTROLLER_OPTIONS
+        help="where the pd controller gets rates of change: differences of "
+        "successive readings, or the true velocities, like perfect rate "
+        "sensors (default: difference)",
     )
     parser.add_argument(
         "--d-smoothing",
         type=float,
-        default=0.0,
-        help="pd controller's smoothing of the rate of change, from 0 (none) to "
+        default=None,  # see CONTROLLER_OPTIONS
+        help="pd controller's smoothing of rates of change, from 0 (none) to "
         "just under 1 (heavy): the weight an exponential moving average gives "
         "the previous smoothed value (default: 0)",
     )
     parser.add_argument(
         "--kx",
         type=float,
-        default=0.0,
+        default=None,  # see CONTROLLER_OPTIONS
         help="pd controller's gain on cart position, in newtons per metre; "
         "positive keeps the cart near the centre (default: 0)",
     )
     parser.add_argument(
+        "--kv",
+        type=float,
+        default=None,  # see CONTROLLER_OPTIONS
+        help="pd controller's gain on cart velocity, in newtons per metre per "
+        "second; positive damps the cart's motion (default: 0)",
+    )
+    parser.add_argument(
         "--max-force",
         type=float,
-        default=10.0,
+        default=None,  # see CONTROLLER_OPTIONS
         help="largest push the controller may apply, in newtons (default: 10)",
     )
     parser.add_argument(
@@ -454,7 +530,9 @@ def parse_args():
         action="store_true",
         help="don't open a window, just print the trace",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    apply_controller_options(parser, args)
+    return args
 
 
 def main():
@@ -476,6 +554,7 @@ def main():
             rate_from=args.rate_from,
             smoothing=args.d_smoothing,
             kx=args.kx,
+            kv=args.kv,
         )
     else:
         controller = no_control
