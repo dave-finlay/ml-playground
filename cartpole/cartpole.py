@@ -7,6 +7,7 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   (CartPole.step works around that). The controllers so far:
   - none: always 0 N, so the pole just falls
   - p: proportional to the pole angle, up to a maximum force
+  - pd: proportional to the pole angle plus its rate of change
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -21,6 +22,7 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --slow 4 --seed 7
     uv run python cartpole/cartpole.py --controller p --kp 20
     uv run python cartpole/cartpole.py --controller p --angle-noise 1 --angle-offset 1
+    uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
 """
 
 import argparse
@@ -28,6 +30,11 @@ import math
 import random
 
 import gymnasium as gym
+
+
+def clamp(value, limit):
+    """Return value limited to the range -limit to +limit."""
+    return max(-limit, min(limit, value))
 
 
 class CartPole:
@@ -182,8 +189,73 @@ class PController:
 
     def __call__(self, state):
         _, _, theta, _ = state
-        force = self.kp * theta
-        return max(-self.max_force, min(self.max_force, force))
+        return clamp(self.kp * theta, self.max_force)
+
+
+class PDController:
+    """Proportional-derivative controller on the pole angle.
+
+    Pushes with kp * angle + kd * (rate of change of the angle), capped at
+    max_force newtons either way. kp is in newtons per radian, kd in
+    newtons per radian per second. The D term resists the pole's motion,
+    damping the swings that P control alone leaves.
+
+    rate_from says where the rate of change comes from:
+    - "difference": estimated from successive angle readings,
+      (angle now - previous angle) / dt, as you would with only an angle
+      sensor. It's 0 on the first step, when there's no previous reading.
+    - "velocity": the angular velocity in the state, as if from a perfect
+      rate sensor (gyroscope).
+
+    smoothing (0 to just under 1) smooths the rate with an exponential
+    moving average before it's used:
+        smoothed = smoothing * previous smoothed + (1 - smoothing) * rate
+    0 means no smoothing. Higher values cut noise more but respond later,
+    and late damping is weaker damping.
+
+    dt is the time between readings in seconds (CartPole.tau). A
+    PDController remembers the previous reading and smoothed rate, so use
+    a new one for each episode.
+    """
+
+    def __init__(
+        self,
+        kp,
+        kd,
+        dt,
+        max_force=10.0,
+        rate_from="difference",
+        smoothing=0.0,
+    ):
+        if rate_from not in ("difference", "velocity"):
+            raise ValueError(f"unknown rate_from: {rate_from!r}")
+        if not 0.0 <= smoothing < 1.0:
+            raise ValueError(f"smoothing must be from 0 to under 1: {smoothing}")
+        self.kp = kp
+        self.kd = kd
+        self.dt = dt
+        self.max_force = max_force
+        self.rate_from = rate_from
+        self.smoothing = smoothing
+        self._previous_theta = None
+        self._smoothed_rate = None
+
+    def __call__(self, state):
+        _, _, theta, theta_dot = state
+        if self.rate_from == "difference":
+            if self._previous_theta is None:
+                theta_dot = 0.0
+            else:
+                theta_dot = (theta - self._previous_theta) / self.dt
+            self._previous_theta = theta
+        if self._smoothed_rate is None:
+            self._smoothed_rate = theta_dot
+        else:
+            self._smoothed_rate = (
+                self.smoothing * self._smoothed_rate
+                + (1.0 - self.smoothing) * theta_dot
+            )
+        return clamp(self.kp * theta + self.kd * self._smoothed_rate, self.max_force)
 
 
 def run_simulation(
@@ -282,15 +354,40 @@ def parse_args():
     )
     parser.add_argument(
         "--controller",
-        choices=["none", "p"],
+        choices=["none", "p", "pd"],
         default="none",
-        help="none: never push; p: push proportional to the pole angle (default: none)",
+        help="none: never push; p: push proportional to the pole angle; pd: "
+        "proportional to the angle plus its rate of change (default: none)",
     )
     parser.add_argument(
         "--kp",
         type=float,
         default=20.0,
-        help="p controller's gain in newtons per radian of lean (default: 20)",
+        help="p and pd controllers' proportional gain, in newtons per radian of "
+        "lean (default: 20)",
+    )
+    parser.add_argument(
+        "--kd",
+        type=float,
+        default=3.0,
+        help="pd controller's derivative gain, in newtons per radian per second "
+        "(default: 3)",
+    )
+    parser.add_argument(
+        "--rate-from",
+        choices=["difference", "velocity"],
+        default="difference",
+        help="where the pd controller gets the angle's rate of change: "
+        "difference of successive angle readings, or the true angular "
+        "velocity, like a perfect gyroscope (default: difference)",
+    )
+    parser.add_argument(
+        "--d-smoothing",
+        type=float,
+        default=0.0,
+        help="pd controller's smoothing of the rate of change, from 0 (none) to "
+        "just under 1 (heavy): the weight an exponential moving average gives "
+        "the previous smoothed value (default: 0)",
     )
     parser.add_argument(
         "--max-force",
@@ -350,6 +447,15 @@ def main():
     )
     if args.controller == "p":
         controller = PController(args.kp, max_force=args.max_force)
+    elif args.controller == "pd":
+        controller = PDController(
+            args.kp,
+            args.kd,
+            dt=cartpole.tau,
+            max_force=args.max_force,
+            rate_from=args.rate_from,
+            smoothing=args.d_smoothing,
+        )
     else:
         controller = no_control
     sensor = AngleSensor(

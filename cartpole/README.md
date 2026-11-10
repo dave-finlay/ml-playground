@@ -34,6 +34,14 @@ A controller is a function (or callable object) from state to force.
   toward the side the pole is leaning with `kp × angle` newtons (`--kp`,
   in N/rad, default 20), capped at `--max-force` newtons either way
   (default 10).
+- `pd` (`PDController`): adds a derivative term, `kd × (rate of change
+  of the angle)` (`--kd`, in N·s/rad, default 3), which damps the
+  swings. By default the rate is estimated from successive angle
+  readings, `(angle now − previous angle) / 0.02 s`, as you would with
+  only an angle sensor; `--rate-from velocity` uses the true angular
+  velocity instead, like a perfect gyroscope. `--d-smoothing` (0 to
+  just under 1, default 0) smooths the rate with an exponential moving
+  average: `smoothed = a × previous smoothed + (1 − a) × rate`.
 
 ```sh
 uv run python cartpole/cartpole.py              # open a window and watch
@@ -41,6 +49,7 @@ uv run python cartpole/cartpole.py --slow 4     # quarter speed
 uv run python cartpole/cartpole.py --seed 7     # repeatable starting state
 uv run python cartpole/cartpole.py --no-window  # just print the trace
 uv run python cartpole/cartpole.py --controller p --kp 20
+uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
 uv run python cartpole/cartpole.py --controller p --track-limit 2.4 --max-steps 500  # standard limits
 ```
 
@@ -94,3 +103,32 @@ Sensor errors with P control (Kp = 20, seed 1, 5 m track, 20 s):
   offset, and keeping a leaning pole from falling needs the cart to
   accelerate continuously that way (about g × tan(lean)), so it runs
   away.
+
+PD control (Kp = 20, seed 1, 5 m track, 20 s), compared with P:
+
+- With a perfect sensor, P's swings have grown to 30° by the end of the
+  20 s. PD with Kd = 3 settles the pole to upright in about 2 s and
+  holds it there. For small angles, Kd ≈ 5 is critical damping at
+  Kp = 20 (fastest settling without overshoot).
+- The cart still drifts slowly, by an amount that depends on how the
+  pole settled: with Kd = 3 it creeps about 6 mm/s.
+- With 1° of noise, estimating the rate from differences amplifies the
+  noise (a 1° jump in 0.02 s looks like 50°/s). Kd = 3 copes, with
+  swings of about 1°; Kd = 5 gets pushed around enough to drift off the
+  track at 17.7 s.
+- PD doesn't help with a 1° offset: the cart still runs off at 5.5 s,
+  because the controller sees no error. That needs cart-position
+  feedback.
+
+Smoothing the D term (`--d-smoothing`, Kp = 20, seed 1, 1° noise):
+
+- Kd = 5, which drifted off the track at 17.7 s unsmoothed, lasts the
+  full 20 s with smoothing 0.5, and the pole's RMS angle in the second
+  10 s drops from 1.5° to 0.5°.
+- Too much smoothing brings the swings back, because the damping
+  arrives late. At 0.95 (time constant about 0.4 s) and above, the
+  overshoot after release grows even with a perfect sensor, and at 0.98
+  (about 1 s) the noisy RMS angle rises to 3.7° (Kd = 5) or 5.7°
+  (Kd = 3). Around 0.5 to 0.8 works well here.
+- The RMS angle doesn't fall much below 0.5° however much the D term is
+  smoothed, because the P term acts on the noisy angle too.
