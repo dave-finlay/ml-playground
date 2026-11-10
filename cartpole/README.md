@@ -16,20 +16,27 @@ The only actions are 0 (push left) and 1 (push right), always with 10 N.
 A normal episode ends when the pole tilts more than 12° or the cart goes
 more than 2.4 m from the centre, or after 500 steps (10 s).
 
-## fall.py: no control
+## cartpole.py: simulation and controllers
 
-Sets the push force to zero and lets the pole fall. It also raises the
-failure angle to 90°, so the episode runs until the pole is flat
-instead of stopping at 12°.
+`cartpole.py` wraps Gymnasium's environment in a `CartPole` class, and
+all access to the environment goes through it. Its `step(force)` takes
+any push in newtons (positive right, negative left, 0 for none), which
+standard CartPole doesn't allow; it does this by setting the
+environment's internal `force_mag` before each step. Episodes run until
+the pole passes 90° (standard CartPole stops at 12°).
+
+A controller is a function from state to force. `run_simulation` runs
+one episode with a given controller. So far there's one controller,
+`no_control`, which always returns 0 N, so the pole just falls.
 
 ```sh
-uv run python cartpole/fall.py              # open a window and watch
-uv run python cartpole/fall.py --slow 4     # quarter speed
-uv run python cartpole/fall.py --seed 7     # repeatable starting state
-uv run python cartpole/fall.py --no-window  # just print the trace
+uv run python cartpole/cartpole.py              # open a window and watch
+uv run python cartpole/cartpole.py --slow 4     # quarter speed
+uv run python cartpole/cartpole.py --seed 7     # repeatable starting state
+uv run python cartpole/cartpole.py --no-window  # just print the trace
 ```
 
-What you see: the pole passes 12° after about 0.75 s and is flat after
+With no control, the pole passes 12° after about 0.75 s and is flat after
 about 1.3 s. The cart drifts a few centimetres the opposite way, pushed
 by the falling pole. The window shows the starting position for a
 second before the pole is released and holds the end position for two
