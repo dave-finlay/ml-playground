@@ -7,7 +7,8 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   (CartPole.step works around that). The controllers so far:
   - none: always 0 N, so the pole just falls
   - p: proportional to the pole angle, up to a maximum force
-  - pd: proportional to the pole angle plus its rate of change
+  - pd: proportional to the pole angle plus its rate of change, and
+    optionally a term proportional to the cart's position
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -23,6 +24,7 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --controller p --kp 20
     uv run python cartpole/cartpole.py --controller p --angle-noise 1 --angle-offset 1
     uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
+    uv run python cartpole/cartpole.py --controller pd --kx 0.5 --max-steps 3000
 """
 
 import argparse
@@ -207,6 +209,14 @@ class PDController:
     - "velocity": the angular velocity in the state, as if from a perfect
       rate sensor (gyroscope).
 
+    kx (newtons per metre, default 0) adds kx * (cart position) to keep
+    the cart near the centre. A positive kx is the useful direction, and
+    it's counter-intuitive: with the cart right of centre, it pushes the
+    cart further right. That tips the pole left, and the angle terms then
+    drive the cart back left, toward the centre. A negative kx, pushing
+    straight back toward the centre, tips the pole the wrong way and
+    makes the cart run away.
+
     smoothing (0 to just under 1) smooths the rate with an exponential
     moving average before it's used:
         smoothed = smoothing * previous smoothed + (1 - smoothing) * rate
@@ -226,6 +236,7 @@ class PDController:
         max_force=10.0,
         rate_from="difference",
         smoothing=0.0,
+        kx=0.0,
     ):
         if rate_from not in ("difference", "velocity"):
             raise ValueError(f"unknown rate_from: {rate_from!r}")
@@ -237,11 +248,12 @@ class PDController:
         self.max_force = max_force
         self.rate_from = rate_from
         self.smoothing = smoothing
+        self.kx = kx
         self._previous_theta = None
         self._smoothed_rate = None
 
     def __call__(self, state):
-        _, _, theta, theta_dot = state
+        x, _, theta, theta_dot = state
         if self.rate_from == "difference":
             if self._previous_theta is None:
                 theta_dot = 0.0
@@ -255,7 +267,8 @@ class PDController:
                 self.smoothing * self._smoothed_rate
                 + (1.0 - self.smoothing) * theta_dot
             )
-        return clamp(self.kp * theta + self.kd * self._smoothed_rate, self.max_force)
+        force = self.kp * theta + self.kd * self._smoothed_rate + self.kx * x
+        return clamp(force, self.max_force)
 
 
 def run_simulation(
@@ -390,6 +403,13 @@ def parse_args():
         "the previous smoothed value (default: 0)",
     )
     parser.add_argument(
+        "--kx",
+        type=float,
+        default=0.0,
+        help="pd controller's gain on cart position, in newtons per metre; "
+        "positive keeps the cart near the centre (default: 0)",
+    )
+    parser.add_argument(
         "--max-force",
         type=float,
         default=10.0,
@@ -455,6 +475,7 @@ def main():
             max_force=args.max_force,
             rate_from=args.rate_from,
             smoothing=args.d_smoothing,
+            kx=args.kx,
         )
     else:
         controller = no_control

@@ -42,6 +42,11 @@ A controller is a function (or callable object) from state to force.
   velocity instead, like a perfect gyroscope. `--d-smoothing` (0 to
   just under 1, default 0) smooths the rate with an exponential moving
   average: `smoothed = a × previous smoothed + (1 − a) × rate`.
+  `--kx` (N/m, default 0) adds a term proportional to the cart's
+  position, to keep the cart near the centre. Positive is the useful
+  direction, and it's counter-intuitive: with the cart right of centre
+  it pushes further right, which tips the pole left so the angle terms
+  then drive the cart back.
 
 ```sh
 uv run python cartpole/cartpole.py              # open a window and watch
@@ -132,3 +137,19 @@ Smoothing the D term (`--d-smoothing`, Kp = 20, seed 1, 1° noise):
   (Kd = 3). Around 0.5 to 0.8 works well here.
 - The RMS angle doesn't fall much below 0.5° however much the D term is
   smoothed, because the P term acts on the noisy angle too.
+
+Cart-position feedback (`--kx`, PD with Kp = 20, Kd = 3, seed 1, up to
+60 s):
+
+- The intuitive sign is the wrong one: Kx = −0.5, pushing the cart
+  back toward the centre, runs it off the track at 9.7 s.
+- Kx = +0.5 does pull the cart back, but it then swings back and forth
+  through the centre (period about 10 s) with slowly growing amplitude,
+  and goes off the track at 56 s. Larger Kx swings harder and fails
+  sooner (Kx = 1 at 28 s, Kx = 2 at 13 s). With a 1° offset, Kx = 0.5
+  lasts 21 s.
+- That's the P-on-angle story again, one level up: in the linearized
+  model, P on position leaves the cart's motion undamped (the closed
+  loop's s¹ coefficient is exactly zero). Damping it needs a term on
+  the cart's velocity, which can be estimated from successive position
+  readings, as the D term on the angle is.
