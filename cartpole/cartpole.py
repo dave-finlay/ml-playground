@@ -1,20 +1,23 @@
-"""Watch the CartPole pole fall over with no control at all.
+"""Watch a controller try to balance the pole on the cart.
 
 Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
 
-- Each step pushes the cart with a force chosen by a controller, here
-  one that always chooses 0 N, so nothing acts on the cart except the
-  pole itself. (Standard CartPole has no "do nothing" action: action 0
-  pushes left and 1 pushes right, always with 10 N. CartPole.step works
-  around that.)
-- The failure angle is raised from 12 degrees to 90 degrees, so the
+- Each step pushes the cart with a force chosen by a controller: any
+  force, not just CartPole's standard full 10 N left or right
+  (CartPole.step works around that). The controllers so far:
+  - none: always 0 N, so the pole just falls
+  - p: proportional to the pole angle, up to a maximum force
+- The failure angle is raised from 12 degrees to 90 degrees, so an
   episode runs until the pole is lying flat instead of stopping as soon
-  as it tilts past 12 degrees.
+  as it tilts past 12 degrees. It also ends if the cart goes more than
+  5 m from the centre, or after 1000 steps (20 s), by default. Standard
+  CartPole uses 2.4 m and 500 steps (10 s).
 
 Run from the repo root:
 
     uv run python cartpole/cartpole.py
     uv run python cartpole/cartpole.py --slow 4 --seed 7
+    uv run python cartpole/cartpole.py --controller p --kp 20
 """
 
 import argparse
@@ -36,20 +39,38 @@ class CartPole:
         self._normal_angle_limit = normal_angle_limit
 
     @staticmethod
-    def make(render_mode=None, slow=1.0, angle_limit=math.pi / 2):
+    def make(
+        render_mode=None,
+        slow=1.0,
+        angle_limit=math.pi / 2,
+        track_limit=2.4,
+        max_steps=500,
+    ):
         """Create a CartPole whose episodes end when the pole passes angle_limit.
 
         angle_limit is in radians. The default, 90 degrees, runs until the
         pole is lying flat; standard CartPole stops at 12 degrees.
 
+        Episodes also end when the cart goes more than track_limit metres
+        from the centre, or after max_steps steps of 0.02 s. The defaults
+        are standard CartPole's: 2.4 m and 500 steps (10 s). The window
+        widens with the track so the cart and pole stay the same size.
+
         render_mode is "human" for a window, "rgb_array" for frames as pixel
         arrays, or None for no drawing. slow is a slow-motion factor for the
         window: 4 plays at quarter speed.
         """
-        env = gym.make("CartPole-v1", render_mode=render_mode)
+        env = gym.make(
+            "CartPole-v1", render_mode=render_mode, max_episode_steps=max_steps
+        )
         physics = env.unwrapped
         normal_angle_limit = physics.theta_threshold_radians
         physics.theta_threshold_radians = angle_limit
+        # The renderer fits the whole track into screen_width pixels.
+        physics.screen_width = round(
+            physics.screen_width * track_limit / physics.x_threshold
+        )
+        physics.x_threshold = track_limit
         fps = physics.metadata["render_fps"] / slow
         physics.metadata = {**physics.metadata, "render_fps": fps}
         return CartPole(env, normal_angle_limit)
@@ -63,6 +84,12 @@ class CartPole:
     def angle_limit(self):
         """Pole angle, in radians, at which this CartPole's episodes end."""
         return self._env.unwrapped.theta_threshold_radians
+
+    @property
+    def track_limit(self):
+        """Distance in metres from the centre at which the cart leaves the
+        track and the episode ends."""
+        return self._env.unwrapped.x_threshold
 
     @property
     def normal_angle_limit(self):
@@ -110,6 +137,24 @@ class CartPole:
 def no_control(state):
     """Controller that never pushes the cart."""
     return 0.0
+
+
+class PController:
+    """Proportional controller on the pole angle.
+
+    Pushes the cart toward the side the pole is leaning, with a force of
+    kp (newtons per radian) times the angle, capped at max_force newtons
+    either way. The target angle is 0 (upright), so the angle is the error.
+    """
+
+    def __init__(self, kp, max_force=10.0):
+        self.kp = kp
+        self.max_force = max_force
+
+    def __call__(self, state):
+        _, _, theta, _ = state
+        force = self.kp * theta
+        return max(-self.max_force, min(self.max_force, force))
 
 
 def run_simulation(cartpole, controller, seed=None, start_pause=1.0, end_pause=2.0):
@@ -162,16 +207,17 @@ def print_trace(states, tau, normal_limit, every=5):
             )
 
 
-def print_summary(states, tau, angle_limit):
+def print_summary(states, tau, angle_limit, track_limit):
     steps = len(states) - 1
     t = steps * tau
-    if abs(states[-1][2]) >= angle_limit:
-        print(
-            f"Pole passed {math.degrees(angle_limit):.0f} degrees after {t:.2f} s "
-            f"({steps} steps of {tau} s)."
-        )
+    x, _, theta, _ = states[-1]
+    if abs(theta) >= angle_limit:
+        reason = f"the pole passed {math.degrees(angle_limit):.0f} degrees"
+    elif abs(x) > track_limit:
+        reason = f"the cart went more than {track_limit} m from the centre"
     else:
-        print(f"Stopped after {t:.2f} s: the cart left the track.")
+        reason = "the time limit, with the pole still up"
+    print(f"Stopped after {t:.2f} s ({steps} steps of {tau} s): {reason}.")
 
 
 def parse_args():
@@ -189,6 +235,38 @@ def parse_args():
         help="slow-motion factor, e.g. 4 plays at quarter speed (default: 1)",
     )
     parser.add_argument(
+        "--controller",
+        choices=["none", "p"],
+        default="none",
+        help="none: never push; p: push proportional to the pole angle (default: none)",
+    )
+    parser.add_argument(
+        "--kp",
+        type=float,
+        default=20.0,
+        help="p controller's gain in newtons per radian of lean (default: 20)",
+    )
+    parser.add_argument(
+        "--max-force",
+        type=float,
+        default=10.0,
+        help="largest push the controller may apply, in newtons (default: 10)",
+    )
+    parser.add_argument(
+        "--track-limit",
+        type=float,
+        default=5.0,
+        help="how far the cart may go from the centre, in metres (default: 5; "
+        "standard CartPole: 2.4)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=1000,
+        help="longest episode, in steps of 0.02 s (default: 1000, i.e. 20 s; "
+        "standard CartPole: 500)",
+    )
+    parser.add_argument(
         "--no-window",
         action="store_true",
         help="don't open a window, just print the trace",
@@ -199,12 +277,19 @@ def parse_args():
 def main():
     args = parse_args()
     cartpole = CartPole.make(
-        render_mode=None if args.no_window else "human", slow=args.slow
+        render_mode=None if args.no_window else "human",
+        slow=args.slow,
+        track_limit=args.track_limit,
+        max_steps=args.max_steps,
     )
-    states = run_simulation(cartpole, no_control, seed=args.seed)
+    if args.controller == "p":
+        controller = PController(args.kp, max_force=args.max_force)
+    else:
+        controller = no_control
+    states = run_simulation(cartpole, controller, seed=args.seed)
     cartpole.close()
     print_trace(states, cartpole.tau, cartpole.normal_angle_limit)
-    print_summary(states, cartpole.tau, cartpole.angle_limit)
+    print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
 
 
 if __name__ == "__main__":
