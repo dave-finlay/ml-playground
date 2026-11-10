@@ -27,6 +27,14 @@ uv sync                       # create .venv and install the locked dependencies
 uv run python <experiment>/<script>.py
 ```
 
+To lint and format with [ruff](https://docs.astral.sh/ruff/) (a dev
+dependency, so `uv sync` installs it; rules are in `pyproject.toml`):
+
+```sh
+uv run ruff check     # look for likely bugs and bad habits
+uv run ruff format    # lay the code out consistently
+```
+
 `uv.lock` is committed, so installs use exact versions. `pyproject.toml`
 sets `exclude-newer = "7 days"`, so uv won't pick up package releases
 less than a week old.

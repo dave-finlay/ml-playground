@@ -19,3 +19,14 @@ package = false
 # are usually caught and pulled within hours. To take an urgent fix
 # sooner, allow just that package with --exclude-newer-package.
 exclude-newer = "7 days"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
