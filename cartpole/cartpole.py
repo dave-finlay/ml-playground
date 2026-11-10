@@ -7,6 +7,8 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   (CartPole.step works around that). The controllers so far:
   - none: always 0 N, so the pole just falls
   - p: proportional to the pole angle, up to a maximum force
+  The controller sees the pole angle through a sensor, which can add
+  noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
   episode runs until the pole is lying flat instead of stopping as soon
   as it tilts past 12 degrees. It also ends if the cart goes more than
@@ -18,10 +20,12 @@ Run from the repo root:
     uv run python cartpole/cartpole.py
     uv run python cartpole/cartpole.py --slow 4 --seed 7
     uv run python cartpole/cartpole.py --controller p --kp 20
+    uv run python cartpole/cartpole.py --controller p --angle-noise 1 --angle-offset 1
 """
 
 import argparse
 import math
+import random
 
 import gymnasium as gym
 
@@ -139,6 +143,31 @@ def no_control(state):
     return 0.0
 
 
+class AngleSensor:
+    """Measures the pole angle the way a real sensor might: imperfectly.
+
+    The reading is scale * (true angle) + offset + noise, where the noise
+    is drawn fresh for each reading from a normal distribution with
+    standard deviation noise_std. offset and noise_std are in radians. The
+    defaults give a perfect sensor. seed makes the noise repeatable.
+
+    The other three state numbers are passed through unchanged, as if
+    measured perfectly.
+    """
+
+    def __init__(self, scale=1.0, offset=0.0, noise_std=0.0, seed=None):
+        self.scale = scale
+        self.offset = offset
+        self.noise_std = noise_std
+        self._random = random.Random(seed)
+
+    def read(self, state):
+        """Return state with its pole angle replaced by this sensor's reading."""
+        x, x_dot, theta, theta_dot = state
+        noise = self._random.gauss(0.0, self.noise_std)
+        return (x, x_dot, self.scale * theta + self.offset + noise, theta_dot)
+
+
 class PController:
     """Proportional controller on the pole angle.
 
@@ -157,48 +186,65 @@ class PController:
         return max(-self.max_force, min(self.max_force, force))
 
 
-def run_simulation(cartpole, controller, seed=None, start_pause=1.0, end_pause=2.0):
-    """Run one episode under controller and return the states it went through.
+def run_simulation(
+    cartpole,
+    controller,
+    sensor=None,
+    seed=None,
+    start_pause=1.0,
+    end_pause=2.0,
+):
+    """Run one episode under controller and return what happened.
 
     Resets cartpole (with seed, if given) and steps it until the episode
-    ends. On each step, controller(state) gives the force in newtons to
-    push the cart with (see CartPole.step).
+    ends. On each step, sensor reads the state, and controller(reading)
+    gives the force in newtons to push the cart with (see CartPole.step).
+    With no sensor, the controller sees a perfect reading.
 
-    Returns a list of states, one per time step, starting with the initial
-    state. Each state is (cart position, cart velocity, pole angle, pole
-    angular velocity).
+    Returns (states, readings): the true states, one per time step starting
+    with the initial state, and what the sensor read for each. Each is
+    (cart position, cart velocity, pole angle, pole angular velocity).
 
     If cartpole draws to a window, it shows the starting position for
     start_pause seconds before the pole is released, and the final
     position for end_pause seconds.
     """
+    if sensor is None:
+        sensor = AngleSensor()
     state = cartpole.reset(seed=seed)
     states = [state]
+    readings = [sensor.read(state)]
     cartpole.pause(start_pause)
 
     terminated = truncated = False
     while not (terminated or truncated):
-        force = controller(state)
+        force = controller(readings[-1])
         state, _, terminated, truncated = cartpole.step(force)
         states.append(state)
+        readings.append(sensor.read(state))
 
     cartpole.pause(end_pause)
-    return states
+    return states, readings
 
 
-def print_trace(states, tau, normal_limit, every=5):
-    """Print time, cart position and pole angle every few steps.
+def print_trace(states, readings, tau, normal_limit, every=5):
+    """Print time, cart position, pole angle and its reading every few steps.
 
     Also marks the step where the pole first passed normal_limit (radians),
     the angle at which a standard episode would have ended. This is only
     for the printout: the simulation itself may have run further.
     """
-    print(f"{'time (s)':>8}  {'cart x (m)':>10}  {'pole angle':>10}")
+    print(f"{'time (s)':>8}  {'cart x (m)':>10}  {'pole angle':>10}  {'reading':>8}")
     last = len(states) - 1
     passed_normal_limit = False
-    for step, (x, _, theta, _) in enumerate(states):
+    for step, ((x, _, theta, _), reading) in enumerate(
+        zip(states, readings, strict=True)
+    ):
         if step % every == 0 or step == last:
-            print(f"{step * tau:8.2f}  {x:10.3f}  {math.degrees(theta):9.1f}°")
+            print(
+                f"{step * tau:8.2f}  {x:10.3f}  {math.degrees(theta):9.1f}°"
+                f"  {math.degrees(reading[2]):7.1f}°"
+            )
         if not passed_normal_limit and abs(theta) > normal_limit:
             passed_normal_limit = True
             print(
@@ -253,6 +299,26 @@ def parse_args():
         help="largest push the controller may apply, in newtons (default: 10)",
     )
     parser.add_argument(
+        "--angle-noise",
+        type=float,
+        default=0.0,
+        help="angle sensor noise: standard deviation in degrees (default: 0)",
+    )
+    parser.add_argument(
+        "--angle-scale",
+        type=float,
+        default=1.0,
+        help="angle sensor scale error: reading = scale x true angle, e.g. 1.05 "
+        "reads 5%% high (default: 1)",
+    )
+    parser.add_argument(
+        "--angle-offset",
+        type=float,
+        default=0.0,
+        help="angle sensor offset error in degrees, added to every reading "
+        "(default: 0)",
+    )
+    parser.add_argument(
         "--track-limit",
         type=float,
         default=5.0,
@@ -286,9 +352,15 @@ def main():
         controller = PController(args.kp, max_force=args.max_force)
     else:
         controller = no_control
-    states = run_simulation(cartpole, controller, seed=args.seed)
+    sensor = AngleSensor(
+        scale=args.angle_scale,
+        offset=math.radians(args.angle_offset),
+        noise_std=math.radians(args.angle_noise),
+        seed=args.seed,
+    )
+    states, readings = run_simulation(cartpole, controller, sensor, seed=args.seed)
     cartpole.close()
-    print_trace(states, cartpole.tau, cartpole.normal_angle_limit)
+    print_trace(states, readings, cartpole.tau, cartpole.normal_angle_limit)
     print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
 
 

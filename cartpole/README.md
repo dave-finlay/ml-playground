@@ -44,6 +44,17 @@ uv run python cartpole/cartpole.py --controller p --kp 20
 uv run python cartpole/cartpole.py --controller p --track-limit 2.4 --max-steps 500  # standard limits
 ```
 
+The controller doesn't see the true state but a reading from an
+`AngleSensor`, which can get the pole angle wrong in three ways (all off
+by default):
+
+- `--angle-noise`: random noise, a fresh normal random number each
+  step with this standard deviation in degrees
+- `--angle-scale`: a scale error, reading = scale × true angle
+- `--angle-offset`: an offset error in degrees, added to every reading
+
+The printed trace shows both the true angle and the reading.
+
 `--track-limit` (default 5 m from the centre) and `--max-steps`
 (default 1000 steps, 20 s) change when an episode ends. Both defaults
 are more generous than standard CartPole's 2.4 m and 500 steps, to give
@@ -71,3 +82,15 @@ about 6 s.
 
 On a track twice as wide (4.8 m) with up to 3000 steps, Kp = 20 keeps
 the pole up for 23 s before the slowly growing swings make it fall.
+
+Sensor errors with P control (Kp = 20, seed 1, 5 m track, 20 s):
+
+- Noise up to 2° still lasts the full 20 s; 5° drifts off the track
+  at 8.8 s.
+- A scale error acts like a different gain: 0.8 (like Kp = 16) lasts
+  20 s, while 1.2 (like Kp = 24) swings harder and falls at 16.5 s.
+- An offset is the damaging one: 1° drives the cart off the track at
+  5.5 s, and 3° at 3.1 s. The controller holds the pole leaning by the
+  offset, and keeping a leaning pole from falling needs the cart to
+  accelerate continuously that way (about g × tan(lean)), so it runs
+  away.
