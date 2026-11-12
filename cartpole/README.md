@@ -345,8 +345,20 @@ by git), named by `--run-name` or after the config file and the time:
   (and whether there were uncommitted changes), the test results, and
   the weights scaled to Kp = 20
 
-`--load runs/NAME` skips training and tests and shows a saved run with
-its saved settings.
+`--no-save` trains, tests and shows the result as usual but saves
+nothing, for quick experiments. `--load runs/NAME` skips training and
+tests and shows a saved run with its saved settings.
+
+`runs.py` lists and deletes runs. `delete` takes run names or paths
+(so the shell can expand patterns), shows what it will delete and asks
+first unless given `--yes`. It only deletes run directories directly
+inside `runs/`, so it can't touch `models/` or anything else.
+
+```sh
+uv run python cartpole/runs.py list                       # name, start time, test result, description
+uv run python cartpole/runs.py delete normalized-seed3-again
+uv run python cartpole/runs.py delete cartpole/runs/default-2026*
+```
 
 ### Normalized inputs
 

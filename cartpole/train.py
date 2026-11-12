@@ -48,6 +48,7 @@ Run from the repo root:
     uv run python cartpole/train.py
     uv run python cartpole/train.py --config cartpole/configs/train/normalized.json
     uv run python cartpole/train.py --learning-rate 1 --run-name slow-learning
+    uv run python cartpole/train.py --learning-rate 1 --no-save
     uv run python cartpole/train.py --load cartpole/runs/slow-learning
     uv run python cartpole/cartpole.py --controller learned \\
         --weights cartpole/runs/slow-learning/weights.json
@@ -432,6 +433,11 @@ def parse_args():
         "config file's name, or 'default', then the date and time)",
     )
     parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="don't save the run: train, test and watch, then keep nothing",
+    )
+    parser.add_argument(
         "--load",
         metavar="RUN_DIR",
         default=None,
@@ -454,6 +460,7 @@ def parse_args():
         extra = given_settings(args, TrainConfig)
         extra += ["--config"] * bool(args.config_file)
         extra += ["--run-name"] * bool(args.run_name)
+        extra += ["--no-save"] * args.no_save
         if extra:
             parser.error(
                 f"--load uses the run's saved settings: drop {' '.join(extra)}"
@@ -465,7 +472,10 @@ def parse_args():
             args.settings = resolve(TrainConfig, args.config_file, args)
     except (OSError, ValueError) as e:
         parser.error(str(e))
-    if not args.load:
+    if args.no_save and args.run_name:
+        parser.error("--no-save doesn't save a run, so it can't take --run-name")
+    args.run_dir = None
+    if not (args.load or args.no_save):
         args.run_dir = RUNS_DIR / (args.run_name or default_run_name(args.config_file))
         if args.run_dir.exists():
             parser.error(f"run directory already exists: {args.run_dir}")
@@ -510,11 +520,13 @@ def main():
         f"{max(lengths)} (limit {cartpole.max_steps})"
     )
 
-    if not args.load:
+    if args.run_dir:
         save_run(
             args.run_dir, config, weights, curve, lengths, cartpole.max_steps, info
         )
         print(f"Saved the run to {os.path.relpath(args.run_dir)}")
+    elif args.no_save:
+        print("Not saved (--no-save).")
 
     if not args.no_window:
         cartpole = CartPole.make(render_mode="human", slow=args.slow, angle_limit=None)
