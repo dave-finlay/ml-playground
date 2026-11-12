@@ -121,3 +121,32 @@ def test_saved_config_loads_back_the_same(tmp_path):
     path = tmp_path / "saved.json"
     save_config(path, config)
     assert load_config(path, Example) == config
+
+
+@dataclasses.dataclass(frozen=True)
+class NumberOrWord:
+    size: int | str = setting(2, "a size", choices=(2, 3, "big"))
+
+
+def parse_number_or_word(argv):
+    parser = argparse.ArgumentParser()
+    add_setting_options(parser, NumberOrWord)
+    return parser.parse_args(argv)
+
+
+@pytest.mark.parametrize("text, value", [("3", 3), ("big", "big")])
+def test_number_or_word_on_the_command_line(text, value):
+    config = resolve(NumberOrWord, None, parse_number_or_word(["--size", text]))
+    assert config.size == value
+
+
+def test_number_or_word_rejects_other_values():
+    with pytest.raises(SystemExit):
+        parse_number_or_word(["--size", "huge"])
+    with pytest.raises(ValueError, match="one of"):
+        make_config(NumberOrWord, {"size": "huge"})
+
+
+def test_number_or_word_in_a_file(tmp_path):
+    assert make_config(NumberOrWord, {"size": "big"}).size == "big"
+    assert make_config(NumberOrWord, {"size": 3}).size == 3

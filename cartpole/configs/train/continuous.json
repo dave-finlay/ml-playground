@@ -1,0 +1,6 @@
+{
+  "description": "Continuous force (a Gaussian policy, so a PD controller with learned gains), normalized, rewarded for survival only",
+  "normalize_inputs": true,
+  "learning_rate": 1.0,
+  "actions": "continuous"
+}

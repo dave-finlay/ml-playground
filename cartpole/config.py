@@ -108,6 +108,25 @@ def save_config(path, config):
         f.write("\n")
 
 
+def command_line_type(kinds):
+    """The function argparse should use to read a setting's value: the
+    setting's type, or for a setting that may be a number or a word (say
+    int | str), the first of its types that reads the text."""
+    if len(kinds) == 1:
+        return kinds[0]
+
+    def read(text):
+        for kind in kinds:
+            try:
+                return kind(text)
+            except ValueError:
+                pass
+        raise argparse.ArgumentTypeError(f"invalid value: {text!r}")
+
+    read.__name__ = " or ".join(kind.__name__ for kind in kinds)
+    return read
+
+
 def describe_default(value):
     if value is None:
         return "none"
@@ -127,17 +146,17 @@ def add_setting_options(parser, config_class):
     )
     hints = typing.get_type_hints(config_class)
     for field in dataclasses.fields(config_class):
-        kind = next(t for t in allowed_types(hints[field.name]) if t is not type(None))
+        kinds = [t for t in allowed_types(hints[field.name]) if t is not type(None)]
         help_text = field.metadata["help"].replace("%", "%%")
         kwargs = {
             "dest": field.name,
             "default": None,
             "help": f"{help_text} (default: {describe_default(field.default)})",
         }
-        if kind is bool:
+        if kinds == [bool]:
             kwargs["action"] = argparse.BooleanOptionalAction
         else:
-            kwargs["type"] = kind
+            kwargs["type"] = command_line_type(kinds)
             kwargs["choices"] = field.metadata["choices"]
         group.add_argument(option_name(field.name), **kwargs)
 

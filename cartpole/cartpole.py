@@ -9,9 +9,10 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   - p: proportional to the pole angle, up to a maximum force
   - pd: proportional to the pole angle plus its rate of change, and
     optionally terms on the cart's position and velocity
-  - learned: weights learned by train.py, either full force left or
-    right by the sign of a weighted sum, or (with three actions) left,
-    right or no push
+  - learned: weights learned by train.py: full force left or right by
+    the sign of a weighted sum, left, right or no push (three actions),
+    or a force proportional to a weighted sum, capped (continuous, which
+    is a PD controller with learned gains)
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -39,6 +40,7 @@ Settings come from built-in defaults, overridden by a JSON config file
 
 import argparse
 import dataclasses
+import itertools
 import json
 import math
 import random
@@ -371,21 +373,45 @@ THREE_ACTIONS = ["push left", "don't push", "push right"]
 THREE_ACTION_INPUTS = [*WEIGHT_INPUTS, "bias (a constant 1)"]
 
 
-def is_three_action(weights):
-    """Whether weights are a ThreeActionController's rows rather than a
-    LinearController's four numbers."""
-    return len(weights) > 0 and hasattr(weights[0], "__len__")
+# The kinds of learned weights, and the controllers that use them:
+# - two-action: four weights; push full force by the sign of weights ·
+#   inputs (LinearController)
+# - three-action: three rows of five; push left, coast or push right by
+#   the highest score (ThreeActionController)
+# - continuous: four weights; push with force weights · inputs, capped,
+#   which is a PD controller with gains Kx, Kv, Kp, Kd (PDController)
+TWO_ACTION, THREE_ACTION, CONTINUOUS = "two-action", "three-action", "continuous"
 
 
-def save_weights(path, weights, rate_from):
-    """Save a LinearController's or ThreeActionController's weights as
-    JSON, with what each one multiplies (only for people reading the file)
-    and how the rates they were learned with were estimated."""
-    if is_three_action(weights):
+def weights_kind(weights):
+    """The kind of weights saved without one: three-action for rows of
+    weights, otherwise two-action (the only kinds there were then)."""
+    if len(weights) > 0 and hasattr(weights[0], "__len__"):
+        return THREE_ACTION
+    return TWO_ACTION
+
+
+def save_weights(path, weights, rate_from, kind=None):
+    """Save learned weights as JSON, with their kind (two-action weights
+    leave it out, as they did before there were other kinds), what each
+    weight multiplies (only for people reading the file) and how the rates
+    they were learned with were estimated. kind defaults to two-action or
+    three-action, by the shape of weights."""
+    kind = kind or weights_kind(weights)
+    if kind == THREE_ACTION:
         saved = {
+            "kind": kind,
             "actions": THREE_ACTIONS,
             "weights": [[float(w) for w in row] for row in weights],
             "inputs": THREE_ACTION_INPUTS,
+            "rate_from": rate_from,
+        }
+    elif kind == CONTINUOUS:
+        saved = {
+            "kind": kind,
+            "force": "weights · inputs newtons, capped at the maximum force",
+            "weights": [float(w) for w in weights],
+            "inputs": WEIGHT_INPUTS,
             "rate_from": rate_from,
         }
     else:
@@ -394,18 +420,18 @@ def save_weights(path, weights, rate_from):
             "inputs": WEIGHT_INPUTS,
             "rate_from": rate_from,
         }
-    with open(path, "w") as f:
-        json.dump(saved, f, indent=2)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(saved, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
 
 def load_weights(path):
-    """Read weights saved by save_weights. Returns (weights, rate_from):
-    four numbers for a LinearController, or three rows of five for a
-    ThreeActionController."""
-    with open(path) as f:
+    """Read weights saved by save_weights. Returns (weights, rate_from,
+    kind)."""
+    with open(path, encoding="utf-8") as f:
         saved = json.load(f)
-    return saved["weights"], saved["rate_from"]
+    weights = saved["weights"]
+    return weights, saved["rate_from"], saved.get("kind") or weights_kind(weights)
 
 
 class LinearController:
@@ -476,11 +502,20 @@ class ThreeActionController:
         return self.max_force if right >= left else -self.max_force
 
 
-def controller_from_weights(weights, dt, max_force=10.0, rate_from="difference"):
-    """Build the controller weights are for: a ThreeActionController for
-    three rows of weights, otherwise a LinearController."""
-    if is_three_action(weights):
+def controller_from_weights(
+    weights, dt, max_force=10.0, rate_from="difference", kind=None
+):
+    """Build the controller for weights of the given kind (by default
+    two-action or three-action, by their shape). Continuous weights make
+    a PDController, whose gains Kx, Kv, Kp and Kd are the weights."""
+    kind = kind or weights_kind(weights)
+    if kind == THREE_ACTION:
         return ThreeActionController(weights, dt, max_force, rate_from)
+    if kind == CONTINUOUS:
+        kx, kv, kp, kd = weights
+        return PDController(
+            kp, kd, dt, max_force=max_force, rate_from=rate_from, kx=kx, kv=kv
+        )
     return LinearController(weights, dt, max_force, rate_from)
 
 
@@ -549,6 +584,60 @@ def print_trace(states, readings, tau, normal_limit, every=5):
                 f"  -- passed {math.degrees(normal_limit):.0f} degrees at "
                 f"{step * tau:.2f} s: a normal episode would end here"
             )
+
+
+class ForceRecorder:
+    """Wraps a controller, recording every force it returns."""
+
+    def __init__(self, controller):
+        self.controller = controller
+        self.forces = []
+
+    def __call__(self, reading):
+        force = self.controller(reading)
+        self.forces.append(force)
+        return force
+
+
+def count_reversals(forces):
+    """How many times the push changes direction, ignoring steps without
+    a push in between: wear on the motor, along with how hard it pushes."""
+    pushes = [f for f in forces if f != 0]
+    return sum(1 for a, b in itertools.pairwise(pushes) if (a > 0) != (b > 0))
+
+
+def control_quality(states, forces, tau):
+    """Measure how well an episode was controlled, as a dict:
+
+    - rms_angle_degrees, rms_position: how far the pole and cart strayed
+      from upright and the centre (root mean square over the episode)
+    - mean_force: the average size of the push, in newtons
+    - push_fraction: the share of steps with any push
+    - reversals_per_second: how often the push changed direction
+
+    states are an episode's states from run_simulation, and forces the
+    pushes between them (one fewer).
+    """
+    angles = [math.degrees(s[2]) for s in states]
+    positions = [s[0] for s in states]
+    steps = max(len(forces), 1)
+    return {
+        "rms_angle_degrees": math.sqrt(sum(a * a for a in angles) / len(angles)),
+        "rms_position": math.sqrt(sum(x * x for x in positions) / len(positions)),
+        "mean_force": sum(abs(f) for f in forces) / steps,
+        "push_fraction": sum(1 for f in forces if f != 0) / steps,
+        "reversals_per_second": count_reversals(forces) / (steps * tau),
+    }
+
+
+def print_quality(quality):
+    print(
+        f"Pole {quality['rms_angle_degrees']:.2f} degrees and cart "
+        f"{quality['rms_position']:.3f} m from centre (RMS); push "
+        f"{quality['mean_force']:.2f} N on average, on "
+        f"{100 * quality['push_fraction']:.0f}% of steps, changing direction "
+        f"{quality['reversals_per_second']:.1f} times a second."
+    )
 
 
 def print_summary(states, tau, angle_limit, track_limit):
@@ -707,9 +796,9 @@ def make_controller(config, dt):
             kv=config.kv,
         )
     if config.controller == "learned":
-        weights, rate_from = load_weights(config.weights)
+        weights, rate_from, kind = load_weights(config.weights)
         return controller_from_weights(
-            weights, dt=dt, max_force=config.max_force, rate_from=rate_from
+            weights, dt=dt, max_force=config.max_force, rate_from=rate_from, kind=kind
         )
     return no_control
 
@@ -756,7 +845,7 @@ def main():
         track_limit=config.track_limit,
         max_steps=config.max_steps,
     )
-    controller = make_controller(config, cartpole.tau)
+    controller = ForceRecorder(make_controller(config, cartpole.tau))
     sensor = AngleSensor(
         scale=config.angle_scale,
         offset=math.radians(config.angle_offset),
@@ -767,6 +856,7 @@ def main():
     cartpole.close()
     print_trace(states, readings, cartpole.tau, cartpole.normal_angle_limit)
     print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
+    print_quality(control_quality(states, controller.forces, cartpole.tau))
 
 
 if __name__ == "__main__":

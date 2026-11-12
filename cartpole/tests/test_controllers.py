@@ -1,6 +1,7 @@
 """Tests for cartpole.py's rate estimation and controllers."""
 
 import json
+import math
 import random
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from cartpole import (
     Smoother,
     ThreeActionController,
     check_controller_settings,
+    control_quality,
     controller_from_weights,
     load_weights,
     locate_weights,
@@ -121,7 +123,7 @@ def test_linear_controller_needs_four_weights():
 def test_weights_file_round_trip(tmp_path):
     path = tmp_path / "weights.json"
     save_weights(path, [-0.1, 1.2, 4.3, 6.0], "velocity")
-    assert load_weights(path) == ([-0.1, 1.2, 4.3, 6.0], "velocity")
+    assert load_weights(path) == ([-0.1, 1.2, 4.3, 6.0], "velocity", "two-action")
 
 
 @pytest.mark.parametrize("path", sorted(CONFIGS_DIR.glob("*.json")), ids=str)
@@ -264,4 +266,34 @@ def test_three_action_weights_file_round_trip(tmp_path):
     saved = json.loads(path.read_text())
     assert saved["actions"] == ["push left", "don't push", "push right"]
     assert saved["inputs"][-1].startswith("bias")
-    assert load_weights(path) == (DEAD_BAND, "velocity")
+    assert load_weights(path) == (DEAD_BAND, "velocity", "three-action")
+
+
+def test_continuous_weights_make_a_pd_controller(tmp_path):
+    """Continuous weights are the gains Kx, Kv, Kp, Kd: force = weights ·
+    inputs, capped."""
+    path = tmp_path / "weights.json"
+    save_weights(path, [0.5, 1.0, 20.0, 3.0], "velocity", kind="continuous")
+    weights, rate_from, kind = load_weights(path)
+    assert kind == "continuous"
+    controller = controller_from_weights(weights, DT, 10.0, rate_from, kind)
+    assert isinstance(controller, PDController)
+    # 0.5 * 1 + 1 * (-1) + 20 * 0.1 + 3 * 0.5 = 3.0
+    assert controller((1.0, -1.0, 0.1, 0.5)) == pytest.approx(3.0)
+    assert controller((0.0, 0.0, 1.0, 0.0)) == 10.0  # 20 N, capped
+
+
+def test_weights_saved_without_a_kind_are_two_action(tmp_path):
+    path = tmp_path / "weights.json"
+    path.write_text(json.dumps({"weights": [0, 0, 1, 0], "rate_from": "difference"}))
+    assert load_weights(path)[2] == "two-action"
+
+
+def test_control_quality():
+    states = [(0.1, 0, math.radians(2), 0), (-0.1, 0, math.radians(-2), 0)]
+    quality = control_quality(states, [10.0, 0.0, -10.0, -5.0], tau=0.5)
+    assert quality["rms_angle_degrees"] == pytest.approx(2.0)
+    assert quality["rms_position"] == pytest.approx(0.1)
+    assert quality["mean_force"] == pytest.approx(6.25)
+    assert quality["push_fraction"] == pytest.approx(0.75)
+    assert quality["reversals_per_second"] == pytest.approx(1 / 2.0)  # 1 in 2 s

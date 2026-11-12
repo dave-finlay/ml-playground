@@ -1,0 +1,8 @@
+{
+  "description": "Continuous force, normalized, rewarded for survival less costs for pole angle and cart position",
+  "normalize_inputs": true,
+  "learning_rate": 1.0,
+  "actions": "continuous",
+  "angle_cost": 0.3,
+  "position_cost": 0.2
+}

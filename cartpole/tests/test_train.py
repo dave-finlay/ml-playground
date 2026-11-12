@@ -10,6 +10,8 @@ import pytest
 from cartpole import CartPole
 from config import load_config
 from train import (
+    Costs,
+    GaussianPolicy,
     LinearPolicy,
     ThreeActionPolicy,
     TrainConfig,
@@ -113,6 +115,14 @@ def test_scale_to_kp():
         {"actions": 2, "push_cost": 0.1},  # every step pushes with two actions
         {"checkpoint_every": -1},
         {"checkpoint_episodes": 0},
+        {"angle_cost": -0.1},
+        {"angle_cost": 0.5, "position_cost": 0.5},  # costs must add to under 1
+        {"actions": "continuous", "force_cost": 0.4, "angle_cost": 0.6},
+        {"force_cost": 0.1},  # needs continuous actions
+        {"actions": 3, "force_cost": 0.1},
+        {"force_std": 2.0},  # needs continuous actions
+        {"actions": "continuous", "force_std": 0.0},
+        {"actions": "continuous", "push_cost": 0.1},  # needs three actions
     ],
 )
 def test_train_config_rejects_out_of_range(changes):
@@ -275,7 +285,7 @@ class AlwaysDoes:
 def test_push_cost_comes_off_pushing_steps_only(action, reward):
     cartpole = CartPole.make(angle_limit=None)
     _, _, _, rewards = play_episode(
-        cartpole, AlwaysDoes(action), "velocity", None, seed=1, push_cost=0.25
+        cartpole, AlwaysDoes(action), "velocity", None, seed=1, costs=Costs(push=0.25)
     )
     cartpole.close()
     assert set(rewards) == {reward}
@@ -335,3 +345,69 @@ def test_relies_on_randomness_needs_a_clear_gap():
     assert relies_on_randomness(498, 266, 500)
     assert not relies_on_randomness(480, 500, 500)
     assert not relies_on_randomness(500, 460, 500)  # within a tenth of 500
+
+
+def test_gaussian_gradient_matches_numerical_derivative():
+    """z / std * s for the gains and z^2 - 1 for the log of the spread
+    really are the derivatives of log pi(a | s), the log of the normal
+    density of the force a."""
+    rng = np.random.default_rng(6)
+    weights, inputs = np.append(rng.normal(size=4), math.log(3.0)), rng.normal(size=4)
+    policy = GaussianPolicy(weights)
+    force = policy.mean(inputs) + 1.7
+    analytic = policy.gradient(
+        inputs[None, :], np.array([force]), np.array([policy.mean(inputs)]), np.ones(1)
+    )
+
+    def log_pi(w):
+        p = GaussianPolicy(w)
+        z = (force - p.mean(inputs)) / p.std
+        return -0.5 * z * z - math.log(p.std) - 0.5 * math.log(2 * math.pi)
+
+    h = 1e-6
+    numerical = [
+        (log_pi(weights + h * e) - log_pi(weights - h * e)) / (2 * h) for e in np.eye(5)
+    ]
+    assert analytic == pytest.approx(numerical, rel=1e-6)
+
+
+def test_gaussian_force_is_capped():
+    policy = GaussianPolicy([0, 0, 0, 0, 0])
+    assert policy.force(25.0) == 10.0 and policy.force(-13.0) == -10.0
+    assert policy.force(4.5) == 4.5
+
+
+class StubCartPole:
+    angle_limit = math.radians(12)
+    track_limit = 2.4
+
+
+@pytest.mark.parametrize(
+    "costs, state, force, reward",
+    [
+        (Costs(), (2.4, 0, 0.2, 0), 10.0, 1.0),
+        (Costs(force=0.2), (0, 0, 0, 0), 5.0, 1 - 0.2 * 0.25),
+        (Costs(angle=0.3), (0, 0, math.radians(6), 0), 0.0, 1 - 0.3 * 0.25),
+        (Costs(position=0.1), (1.2, 0, 0, 0), 0.0, 1 - 0.1 * 0.25),
+        (Costs(angle=0.3), (0, 0, math.radians(30), 0), 0.0, 1 - 0.3),  # capped
+        (Costs(push=0.25), (0, 0, 0, 0), 0.0, 1.0),  # no push, no cost
+    ],
+)
+def test_costs(costs, state, force, reward):
+    assert costs.reward(1.0, state, force, StubCartPole()) == pytest.approx(reward)
+
+
+def test_continuous_training_learns(capsys):
+    config = TrainConfig(
+        seed=3,
+        batches=40,
+        normalize_inputs=True,
+        learning_rate=3.0,
+        actions="continuous",
+        checkpoint_every=0,
+    )
+    result = training_result(config, capsys)
+    assert result.weights.shape == (4,)
+    assert result.force_std > 0
+    mean_lengths = [row[2] for row in result.curve]
+    assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])

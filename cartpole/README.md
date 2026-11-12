@@ -315,8 +315,12 @@ command-line options from it (`learning_rate` becomes
 | `seed` | none | seeds training and the test episodes; none differs each run |
 | `rate_from` | `difference` | `difference` or `velocity` (the true velocities) |
 | `normalize_inputs` | false | divide each input by its typical size (see below) |
-| `actions` | 2 | 2: push left or right; 3: also don't push (see below) |
+| `actions` | 2 | 2: push left or right; 3: also don't push; `continuous`: any force (see below) |
+| `force_std` | 5 | continuous: the starting spread of the sampled force, in newtons (learned) |
 | `push_cost` | 0 | taken off the reward of each pushing step (needs `actions` 3) |
+| `force_cost` | 0 | taken off the reward times (force / 10 N)² (needs `actions` continuous) |
+| `angle_cost` | 0 | taken off the reward times (pole angle / 12°)² |
+| `position_cost` | 0 | taken off the reward times (cart position / 2.4 m)² |
 | `checkpoint_every` | 25 | test without sampling every this many batches, keep the best weights and say whether sampling does better; 0 turns it off |
 | `checkpoint_episodes` | 30 | test episodes at each checkpoint |
 | `batches` | 200 | number of updates |
@@ -333,6 +337,9 @@ only needs the settings it changes:
 - `normalized.json`: normalized inputs, with learning rate 3
 - `three-actions.json`: normalized, three actions, push cost 0.3
 - `three-actions-long.json`: the same for 1000 batches
+- `continuous.json`: continuous force, survival only, learning rate 1
+- `continuous-precise.json`: continuous force with angle and position
+  costs
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
@@ -487,6 +494,57 @@ checkpoint episodes it kept batch 900 instead, which looked perfect on
 those 10 but averaged 448 in the final test (shortest 151): a few
 episodes can't tell a robust controller from a lucky one, hence the
 default of 30.
+
+### Continuous force
+
+With `actions` continuous, the policy pushes with a force drawn from a
+normal distribution: mean w · s newtons, spread σ (learned, starting at
+`force_std`, never below 0.1 N), capped at ±10 N when applied. Once
+trained it pushes with the mean, capped: exactly `PDController` with
+gains Kx, Kv, Kp, Kd = w, which is what `cartpole.py` runs for
+continuous weights. So the learned weights need no scaling to compare
+with hand-tuned gains. The update is REINFORCE again: with z = (F − μ)/σ,
+z/σ · s for the gains (move the mean toward forces that did better than
+average) and z² − 1 for log σ.
+
+Survival alone gave sloppy discrete controllers, so the reward can
+include costs: r = 1 − `angle_cost`·(θ/12°)² − `position_cost`·(x/2.4 m)²
+− `force_cost`·(F/10 N)² (each fraction capped at 1). The costs must add
+up to less than 1 so every step is still worth surviving; otherwise
+ending the episode early can pay. Squared costs make small corrections
+cheap and large ones expensive, the idea behind the classic LQR
+controller. `angle_cost` and `position_cost` work for discrete policies
+too; checkpoints score by the full reward.
+
+Both scripts now report control quality: RMS pole angle and cart
+position, mean force, share of steps pushing and direction changes per
+second (not meaningful for continuous force, which flips sign around 0
+with every bit of sensor noise).
+
+Results (normalized, learning rate 1, 200 batches, seeds 1 to 4; tested
+on `cartpole.py`'s 5 m track for 20 s, 5 seeds each; noisy means 1°
+noise and a 1° offset):
+
+| controller | gains Kx, Kv, Kp, Kd | perfect: RMS angle | noisy: RMS angle, cart, mean force |
+|---|---|---|---|
+| hand-tuned PD (`pd-noise-offset.json`) | 0.5, 1, 20, 3 | 0.22° | 0.93°, 0.65 m, 2.8 N |
+| survival only (3 of 4 seeds) | 0.3 to 1.4, 0.5 to 1.0, 20 to 26, 1.8 to 3.2 | 0.19° to 0.25° | 0.88° to 1.21°, 0.35 to 0.99 m, 2.0 to 3.4 N |
+| angle 0.3 + position 0.2 (4 of 4) | 0.6 to 1.3, 0.5 to 1.2, 23 to 28, 2.3 to 3.2 | 0.20° to 0.22° | 0.92° to 1.03°, 0.37 to 0.85 m, 2.5 to 3.4 N |
+| + force 0.3 (4 of 4) | 0.4 to 1.1, 0.7 to 0.9, 23 to 27, 2.2 to 3.1 | 0.21° to 0.24° | 0.94° to 1.00°, 0.43 to 0.88 m, 2.4 to 3.3 N |
+
+- With a force it can choose, REINFORCE learns gains much like the
+  hand-tuned ones, and controls as well: the gap with PD was the
+  actions, not the learning.
+- Survival alone failed once (seed 4 learned Kp = 12, barely above the
+  10.8 N/rad needed to beat gravity, and no Kv, and fell on the long
+  track). The angle and position costs made all seeds reliable and their
+  gains more consistent.
+- The force cost hardly changed the effort under noise. Training uses a
+  perfect sensor, where the forces needed are tiny (about 0.03 N), so
+  the cost barely bites; under noise, the effort is mostly the gains
+  multiplying noise. Reducing it would mean training with noise.
+- Learning rate: 1 is steady, 3 learns faster but drifts to stiffer
+  gains (Kp 29 to 50), 10 is unstable.
 
 ### Results so far
 
