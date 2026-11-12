@@ -9,6 +9,8 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   - p: proportional to the pole angle, up to a maximum force
   - pd: proportional to the pole angle plus its rate of change, and
     optionally terms on the cart's position and velocity
+  - learned: full force left or right, by the sign of weights learned by
+    train.py
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -25,9 +27,12 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --controller p --angle-noise 1 --angle-offset 1
     uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
     uv run python cartpole/cartpole.py --controller pd --kx 0.5 --kv 1 --max-steps 3000
+    uv run python cartpole/cartpole.py --controller learned \
+        --weights cartpole/linear-policy.json
 """
 
 import argparse
+import json
 import math
 import random
 
@@ -62,7 +67,8 @@ class CartPole:
         """Create a CartPole whose episodes end when the pole passes angle_limit.
 
         angle_limit is in radians. The default, 90 degrees, runs until the
-        pole is lying flat; standard CartPole stops at 12 degrees.
+        pole is lying flat; None keeps standard CartPole's limit of 12
+        degrees.
 
         Episodes also end when the cart goes more than track_limit metres
         from the centre, or after max_steps steps of 0.02 s. The defaults
@@ -78,7 +84,8 @@ class CartPole:
         )
         physics = env.unwrapped
         normal_angle_limit = physics.theta_threshold_radians
-        physics.theta_threshold_radians = angle_limit
+        if angle_limit is not None:
+            physics.theta_threshold_radians = angle_limit
         # The renderer fits the whole track into screen_width pixels.
         physics.screen_width = round(
             physics.screen_width * track_limit / physics.x_threshold
@@ -103,6 +110,11 @@ class CartPole:
         """Distance in metres from the centre at which the cart leaves the
         track and the episode ends."""
         return self._env.unwrapped.x_threshold
+
+    @property
+    def max_steps(self):
+        """Number of steps after which an episode ends regardless."""
+        return self._env.spec.max_episode_steps
 
     @property
     def normal_angle_limit(self):
@@ -238,6 +250,42 @@ class Smoother:
         return self._smoothed
 
 
+class RateEstimator:
+    """Turns readings into the four numbers the controllers work from:
+    (cart position, its rate of change, pole angle, its rate of change).
+
+    rate_from says where both rates come from:
+    - "difference": estimated from successive readings, as you would with
+      only angle and position sensors (see Differencer)
+    - "velocity": the velocities in the reading, as if from perfect rate
+      sensors
+
+    smoothing (0 to just under 1) smooths both rates with an exponential
+    moving average (see Smoother). dt is the time between readings in
+    seconds (CartPole.tau). A RateEstimator remembers previous readings,
+    so use a new one for each episode.
+    """
+
+    def __init__(self, dt, rate_from="difference", smoothing=0.0):
+        if rate_from not in ("difference", "velocity"):
+            raise ValueError(f"unknown rate_from: {rate_from!r}")
+        self.rate_from = rate_from
+        self._theta_differencer = Differencer(dt)
+        self._x_differencer = Differencer(dt)
+        self._theta_rate_smoother = Smoother(smoothing)
+        self._x_rate_smoother = Smoother(smoothing)
+
+    def update(self, reading):
+        """Take the next reading and return (x, x rate, angle, angle rate)."""
+        x, x_dot, theta, theta_dot = reading
+        if self.rate_from == "difference":
+            theta_dot = self._theta_differencer.update(theta)
+            x_dot = self._x_differencer.update(x)
+        theta_rate = self._theta_rate_smoother.update(theta_dot)
+        x_rate = self._x_rate_smoother.update(x_dot)
+        return (x, x_rate, theta, theta_rate)
+
+
 class PDController:
     """Proportional-derivative controller on the pole angle and, optionally,
     the cart position.
@@ -263,19 +311,10 @@ class PDController:
     fails too (above about 2 N·s/m with kp = 20, kd = 3): it undoes the
     damping of the pole's swing.
 
-    rate_from says where both rates (the angle's and the cart's) come from:
-    - "difference": estimated from successive readings, as you would with
-      only angle and position sensors (see Differencer)
-    - "velocity": the velocities in the state, as if from perfect rate
-      sensors
-
-    smoothing (0 to just under 1) smooths both rates with an exponential
-    moving average before they're used (see Smoother). Late damping is
-    weaker damping, so too much smoothing brings swings back.
-
-    dt is the time between readings in seconds (CartPole.tau). A
-    PDController remembers previous readings and smoothed rates, so use a
-    new one for each episode.
+    dt, rate_from and smoothing say how the rates are estimated (see
+    RateEstimator). Late damping is weaker damping, so too much smoothing
+    brings swings back. A PDController remembers previous readings, so use
+    a new one for each episode.
     """
 
     def __init__(
@@ -289,28 +328,62 @@ class PDController:
         kx=0.0,
         kv=0.0,
     ):
-        if rate_from not in ("difference", "velocity"):
-            raise ValueError(f"unknown rate_from: {rate_from!r}")
         self.kp = kp
         self.kd = kd
         self.kx = kx
         self.kv = kv
         self.max_force = max_force
-        self.rate_from = rate_from
-        self._theta_differencer = Differencer(dt)
-        self._x_differencer = Differencer(dt)
-        self._theta_rate_smoother = Smoother(smoothing)
-        self._x_rate_smoother = Smoother(smoothing)
+        self._rates = RateEstimator(dt, rate_from, smoothing)
 
-    def __call__(self, state):
-        x, x_dot, theta, theta_dot = state
-        if self.rate_from == "difference":
-            theta_dot = self._theta_differencer.update(theta)
-            x_dot = self._x_differencer.update(x)
-        theta_rate = self._theta_rate_smoother.update(theta_dot)
-        x_rate = self._x_rate_smoother.update(x_dot)
+    def __call__(self, reading):
+        x, x_rate, theta, theta_rate = self._rates.update(reading)
         force = self.kp * theta + self.kd * theta_rate + self.kx * x + self.kv * x_rate
         return clamp(force, self.max_force)
+
+
+def save_weights(path, weights, rate_from):
+    """Save a LinearController's weights, and how the rates they were
+    learned with were estimated, as JSON."""
+    with open(path, "w") as f:
+        json.dump({"weights": list(weights), "rate_from": rate_from}, f, indent=2)
+        f.write("\n")
+
+
+def load_weights(path):
+    """Read weights saved by save_weights. Returns (weights, rate_from)."""
+    with open(path) as f:
+        saved = json.load(f)
+    return saved["weights"], saved["rate_from"]
+
+
+class LinearController:
+    """Bang-bang controller with learned weights: pushes max_force newtons
+    right when
+
+        weights · (cart position, its rate, pole angle, its rate) >= 0
+
+    and max_force left otherwise. It's what train.py's policy does once
+    trained, when it takes the likelier action instead of sampling. The
+    weights play the roles of the PD controller's Kx, Kv, Kp and Kd, but
+    only their ratios matter, since only the sign of the sum is used.
+
+    dt and rate_from say how the rates are estimated (see RateEstimator).
+    Use the same rate_from the weights were learned with. A
+    LinearController remembers previous readings, so use a new one for
+    each episode.
+    """
+
+    def __init__(self, weights, dt, max_force=10.0, rate_from="difference"):
+        if len(weights) != 4:
+            raise ValueError(f"need 4 weights, got {len(weights)}")
+        self.weights = list(weights)
+        self.max_force = max_force
+        self._rates = RateEstimator(dt, rate_from)
+
+    def __call__(self, reading):
+        inputs = self._rates.update(reading)
+        total = sum(w * v for w, v in zip(self.weights, inputs, strict=True))
+        return self.max_force if total >= 0 else -self.max_force
 
 
 def run_simulation(
@@ -398,9 +471,9 @@ def print_summary(states, tau, angle_limit, track_limit):
 # rather than being silently ignored.
 CONTROLLER_OPTIONS = {
     "kp": (("p", "pd"), 20.0),
-    "max_force": (("p", "pd"), 10.0),
+    "max_force": (("p", "pd", "learned"), 10.0),
     "kd": (("pd",), 3.0),
-    "rate_from": (("pd",), "difference"),
+    "rate_from": (("pd",), "difference"),  # learned: from the weights file
     "d_smoothing": (("pd",), 0.0),
     "kx": (("pd",), 0.0),
     "kv": (("pd",), 0.0),
@@ -436,10 +509,16 @@ def parse_args():
     )
     parser.add_argument(
         "--controller",
-        choices=["none", "p", "pd"],
+        choices=["none", "p", "pd", "learned"],
         default="none",
         help="none: never push; p: push proportional to the pole angle; pd: "
-        "proportional to the angle plus its rate of change (default: none)",
+        "proportional to the angle plus its rate of change; learned: full "
+        "force left or right, by weights from --weights (default: none)",
+    )
+    parser.add_argument(
+        "--weights",
+        default=None,
+        help="learned controller's weights file, saved by train.py",
     )
     parser.add_argument(
         "--kp",
@@ -532,6 +611,8 @@ def parse_args():
     )
     args = parser.parse_args()
     apply_controller_options(parser, args)
+    if (args.controller == "learned") != (args.weights is not None):
+        parser.error("--controller learned and --weights go together")
     return args
 
 
@@ -555,6 +636,11 @@ def main():
             smoothing=args.d_smoothing,
             kx=args.kx,
             kv=args.kv,
+        )
+    elif args.controller == "learned":
+        weights, rate_from = load_weights(args.weights)
+        controller = LinearController(
+            weights, dt=cartpole.tau, max_force=args.max_force, rate_from=rate_from
         )
     else:
         controller = no_control
