@@ -35,6 +35,14 @@ uv run ruff check     # look for likely bugs and bad habits
 uv run ruff format    # lay the code out consistently
 ```
 
+To run the tests with [pytest](https://docs.pytest.org/) (also a dev
+dependency; each experiment keeps its tests in its own `tests/`
+directory, listed in `pyproject.toml`):
+
+```sh
+uv run pytest
+```
+
 `uv.lock` is committed, so installs use exact versions. `pyproject.toml`
 sets `exclude-newer = "7 days"`, so uv won't pick up package releases
 less than a week old.

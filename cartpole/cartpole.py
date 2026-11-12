@@ -28,7 +28,7 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
     uv run python cartpole/cartpole.py --controller pd --kx 0.5 --kv 1 --max-steps 3000
     uv run python cartpole/cartpole.py --controller learned \
-        --weights cartpole/linear-policy.json
+        --weights cartpole/runs/RUN/weights.json
 """
 
 import argparse

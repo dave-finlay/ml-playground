@@ -21,23 +21,38 @@ Afterwards the trained policy plays without sampling, always taking the
 likelier action, which makes it a controller like the hand-tuned ones in
 cartpole.py: push right when w · s >= 0 (cartpole.py's LinearController).
 So the weights play the roles of the PD controller's gains Kx, Kv, Kp and
-Kd. To run saved weights in cartpole.py, with its longer track and
-episodes and its imperfect sensors:
+Kd.
 
-    uv run python cartpole/cartpole.py --controller learned \
-        --weights cartpole/linear-policy.json
+Settings come from built-in defaults, overridden by a JSON config file
+(--config), overridden by command-line options; see config.py. Each
+training run is saved in its own directory under cartpole/runs/:
+
+- config.json: every setting the run used (usable as a config file to
+  repeat the run)
+- weights.json: the learned weights, for cartpole.py --weights
+- curve.csv: the learning curve, one row per batch
+- results.json: test results, timing and the git commit of the code
 
 Run from the repo root:
 
     uv run python cartpole/train.py
-    uv run python cartpole/train.py --seed 3 --batches 100 --no-window
-    uv run python cartpole/train.py --learning-rate 1
-    uv run python cartpole/train.py --rate-from velocity
-    uv run python cartpole/train.py --load cartpole/linear-policy.json
+    uv run python cartpole/train.py --config cartpole/configs/standard.json --seed 3
+    uv run python cartpole/train.py --learning-rate 1 --run-name slow-learning
+    uv run python cartpole/train.py --load cartpole/runs/slow-learning
+    uv run python cartpole/cartpole.py --controller learned \\
+        --weights cartpole/runs/slow-learning/weights.json
 """
 
 import argparse
+import csv
+import dataclasses
+import datetime
+import json
 import math
+import os
+import subprocess
+import time
+from pathlib import Path
 
 import numpy as np
 
@@ -50,11 +65,20 @@ from cartpole import (
     run_simulation,
     save_weights,
 )
+from config import (
+    add_setting_options,
+    given_settings,
+    load_config,
+    resolve,
+    save_config,
+    setting,
+)
 
 FORCE = 10.0  # standard CartPole's push, in newtons
+RUNS_DIR = Path(__file__).parent / "runs"
 
 # The hand-tuned "gentle" gains from cartpole.py's PD controller, for
-# comparison with the learned weights, in the state's order: Kx, Kv, Kp, Kd.
+# comparison with the learned weights, in the inputs' order: Kx, Kv, Kp, Kd.
 PD_GAINS = np.array([0.5, 1.0, 20.0, 3.0])
 GAIN_NAMES = [
     "Kx (cart position)",
@@ -62,6 +86,40 @@ GAIN_NAMES = [
     "Kp (pole angle)",
     "Kd (pole rate)",
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainConfig:
+    """Everything that decides what a training run does."""
+
+    description: str = setting("", "what this configuration is for")
+    seed: int | None = setting(
+        None,
+        "random seed for training and for the test episodes; none gives a "
+        "different run each time",
+    )
+    rate_from: str = setting(
+        "difference",
+        "where the policy's rates of change come from: differences of "
+        "successive positions and angles, or the true velocities",
+        choices=("difference", "velocity"),
+    )
+    batches: int = setting(200, "number of weight updates")
+    batch_size: int = setting(10, "episodes played per update")
+    learning_rate: float = setting(10.0, "step size for each update")
+    gamma: float = setting(0.99, "discount factor for future rewards")
+    eval_episodes: int = setting(
+        20, "episodes to test the trained policy on, without sampling"
+    )
+
+    def __post_init__(self):
+        for name in ("batches", "batch_size", "eval_episodes"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} should be at least 1")
+        if self.learning_rate <= 0:
+            raise ValueError("learning_rate should be more than 0")
+        if not 0 < self.gamma <= 1:
+            raise ValueError("gamma should be more than 0 and at most 1")
 
 
 def sigmoid(z):
@@ -150,130 +208,184 @@ def policy_gradient(episodes, gamma):
     return ((advantages * (actions - probs))[:, None] * inputs).mean(axis=0)
 
 
-def train(
-    cartpole,
-    batches,
-    batch_size,
-    learning_rate,
-    gamma,
-    rate_from,
-    rng,
-    seed=None,
-    report_every=10,
-):
+def train(cartpole, config, rng, report_every=10):
     """Train a LinearPolicy, starting from all-zero weights (a coin toss
-    every step), and return it.
+    every step), and return (policy, curve).
 
-    Prints a learning curve as it goes: every report_every batches, the
-    mean, shortest and longest episode in the latest batch, and the
-    weights.
+    curve has one row per batch: (batch, episodes so far, mean, shortest
+    and longest episode in the batch, then the four weights after the
+    batch's update). Every report_every batches, the row is also printed.
     """
     policy = LinearPolicy(np.zeros(4))
+    curve = []
     print(
         f"{'batch':>5}  {'episodes':>8}  {'mean len':>8}  {'min':>4}  "
         f"{'max':>4}  weights (x, x rate, angle, angle rate)"
     )
-    for batch in range(1, batches + 1):
+    for batch in range(1, config.batches + 1):
         episodes = []
-        for i in range(batch_size):
-            episode_seed = seed if batch == 1 and i == 0 else None
+        for i in range(config.batch_size):
+            episode_seed = config.seed if batch == 1 and i == 0 else None
             episodes.append(
-                play_episode(cartpole, policy, rate_from, rng, episode_seed)
+                play_episode(cartpole, policy, config.rate_from, rng, episode_seed)
             )
-        policy.weights += learning_rate * policy_gradient(episodes, gamma)
-        if batch % report_every == 0 or batch == 1 or batch == batches:
-            lengths = [len(r) for _, _, _, r in episodes]
+        policy.weights += config.learning_rate * policy_gradient(episodes, config.gamma)
+        lengths = [len(r) for _, _, _, r in episodes]
+        row = (
+            batch,
+            batch * config.batch_size,
+            float(np.mean(lengths)),
+            min(lengths),
+            max(lengths),
+            *policy.weights.tolist(),
+        )
+        curve.append(row)
+        if batch % report_every == 0 or batch == 1 or batch == config.batches:
             weights = " ".join(f"{w:7.3f}" for w in policy.weights)
             print(
-                f"{batch:5}  {batch * batch_size:8}  {np.mean(lengths):8.1f}  "
-                f"{min(lengths):4}  {max(lengths):4}  {weights}"
+                f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  "
+                f"{weights}"
             )
-    return policy
+    return policy, curve
 
 
-def evaluate(cartpole, weights, rate_from, episodes):
+def evaluate(cartpole, weights, rate_from, episodes, seed=None):
     """Play episodes with the weights as a controller (no sampling) and
-    return their lengths in steps."""
+    return their lengths in steps. seed, if given, sets the first starting
+    state, which makes the whole set repeatable."""
     lengths = []
-    for _ in range(episodes):
+    for i in range(episodes):
         controller = LinearController(weights, cartpole.tau, FORCE, rate_from)
-        states, _ = run_simulation(cartpole, controller, start_pause=0, end_pause=0)
+        states, _ = run_simulation(
+            cartpole,
+            controller,
+            seed=seed if i == 0 else None,
+            start_pause=0,
+            end_pause=0,
+        )
         lengths.append(len(states) - 1)
     return lengths
 
 
-def print_comparison(weights):
-    """Print the weights next to the hand-tuned PD gains.
+def scale_to_kp(weights):
+    """Scale weights so the pole-angle weight matches the PD gains' Kp.
 
-    As a controller, the policy only uses the sign of weights · state, so
-    multiplying every weight by the same positive number changes nothing.
-    To compare like with like, the weights are scaled so the pole-angle
-    weight matches Kp.
+    As a controller, the policy only uses the sign of weights · inputs, so
+    multiplying every weight by the same positive number changes nothing;
+    scaling lets the weights be read in the PD gains' units.
     """
-    scaled = weights * PD_GAINS[2] / weights[2]
-    print("Learned weights, scaled so the angle weight matches Kp:")
-    print(f"  {'':20}  {'learned':>8}  {'scaled':>8}  {'PD gain':>8}")
-    for name, w, s, g in zip(GAIN_NAMES, weights, scaled, PD_GAINS, strict=True):
-        print(f"  {name:20}  {w:8.3f}  {s:8.2f}  {g:8.2f}")
+    weights = np.asarray(weights)
+    return weights * PD_GAINS[2] / weights[2]
+
+
+def print_comparison(weights):
+    """Print the weights next to the hand-tuned gentle PD gains."""
+    print(
+        "Learned weights, scaled so the angle weight matches Kp, next to the\n"
+        "hand-tuned gentle gains from cartpole.py (--controller pd --kp 20\n"
+        "--kd 3 --kx 0.5 --kv 1):"
+    )
+    print(f"  {'':20}  {'learned':>8}  {'scaled':>8}  {'gentle PD':>9}")
+    rows = zip(GAIN_NAMES, weights, scale_to_kp(weights), PD_GAINS, strict=True)
+    for name, w, s, g in rows:
+        print(f"  {name:20}  {w:8.3f}  {s:8.2f}  {g:9.2f}")
+
+
+def git_version():
+    """Return (commit, dirty) for the code being run: the git commit hash,
+    and whether there are uncommitted changes. (None, None) if git can't
+    tell."""
+    here = Path(__file__).parent
+
+    def git(*command):
+        return subprocess.run(
+            ["git", *command], cwd=here, capture_output=True, text=True, check=True
+        ).stdout
+
+    try:
+        return git("rev-parse", "HEAD").strip(), bool(git("status", "--porcelain"))
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+
+
+def default_run_name(config_file):
+    """Name a run after its config file (or "default") and the time."""
+    stem = Path(config_file).stem if config_file else "default"
+    return f"{stem}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def write_curve(path, curve):
+    """Write the learning curve from train() as CSV, one row per batch."""
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "batch",
+                "episodes",
+                "mean_length",
+                "min_length",
+                "max_length",
+                "w_x",
+                "w_x_rate",
+                "w_angle",
+                "w_angle_rate",
+            ]
+        )
+        writer.writerows(curve)
+
+
+def save_run(run_dir, config, weights, curve, lengths, max_steps, info):
+    """Save everything about a training run in a new directory run_dir.
+
+    info holds what else to record in results.json: when the run started,
+    how long training took and the git version of the code.
+    """
+    run_dir.mkdir(parents=True)
+    save_config(run_dir / "config.json", config)
+    save_weights(run_dir / "weights.json", weights, config.rate_from)
+    write_curve(run_dir / "curve.csv", curve)
+    _, _, mean, shortest, longest, *_ = curve[-1]
+    results = {
+        **info,
+        "last_batch_lengths": {"mean": mean, "min": shortest, "max": longest},
+        "test_lengths": {
+            "episodes": len(lengths),
+            "mean": float(np.mean(lengths)),
+            "min": min(lengths),
+            "max": max(lengths),
+            "limit": max_steps,
+        },
+        "weights_scaled_to_kp": scale_to_kp(weights).tolist(),
+    }
+    save_json(run_dir / "results.json", results)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--seed",
-        type=int,
+        "--config",
+        dest="config_file",
         default=None,
-        help="random seed for training and starting states (default: "
-        "different each run)",
+        help="JSON file of settings, e.g. from cartpole/configs/ or a run's "
+        "config.json",
     )
     parser.add_argument(
-        "--batches",
-        type=int,
-        default=200,
-        help="number of weight updates (default: 200)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=10,
-        help="episodes played per update (default: 10)",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=10.0,
-        help="step size for each update (default: 10)",
-    )
-    parser.add_argument(
-        "--gamma",
-        type=float,
-        default=0.99,
-        help="discount factor for future rewards (default: 0.99)",
-    )
-    parser.add_argument(
-        "--rate-from",
-        choices=["difference", "velocity"],
-        default="difference",
-        help="where the policy's rates of change come from: differences of "
-        "successive positions and angles, or the true velocities (default: "
-        "difference)",
-    )
-    parser.add_argument(
-        "--save",
-        default="cartpole/linear-policy.json",
-        help="where to save the learned weights (default: cartpole/linear-policy.json)",
+        "--run-name",
+        default=None,
+        help="directory name for the run under cartpole/runs/ (default: the "
+        "config file's name, or 'default', then the date and time)",
     )
     parser.add_argument(
         "--load",
+        metavar="RUN_DIR",
         default=None,
-        help="skip training and use weights saved earlier with --save (and the "
-        "rate-from they were saved with)",
-    )
-    parser.add_argument(
-        "--eval-episodes",
-        type=int,
-        default=20,
-        help="episodes to test the trained policy on, without sampling (default: 20)",
+        help="skip training: test and watch a saved run, with its saved settings",
     )
     parser.add_argument(
         "--slow",
@@ -286,44 +398,70 @@ def parse_args():
         action="store_true",
         help="don't open a window to watch the trained policy",
     )
-    return parser.parse_args()
+    add_setting_options(parser, TrainConfig)
+    args = parser.parse_args()
+    if args.load:
+        extra = given_settings(args, TrainConfig)
+        extra += ["--config"] * bool(args.config_file)
+        extra += ["--run-name"] * bool(args.run_name)
+        if extra:
+            parser.error(
+                f"--load uses the run's saved settings: drop {' '.join(extra)}"
+            )
+    try:
+        if args.load:
+            args.settings = load_config(Path(args.load) / "config.json", TrainConfig)
+        else:
+            args.settings = resolve(TrainConfig, args.config_file, args)
+    except (OSError, ValueError) as e:
+        parser.error(str(e))
+    if not args.load:
+        args.run_dir = RUNS_DIR / (args.run_name or default_run_name(args.config_file))
+        if args.run_dir.exists():
+            parser.error(f"run directory already exists: {args.run_dir}")
+    return args
 
 
 def main():
     args = parse_args()
-    rng = np.random.default_rng(args.seed)
-    cartpole = CartPole.make(angle_limit=None)  # standard CartPole
+    config = args.settings
+    if config.description:
+        print(config.description)
 
     if args.load:
-        weights, rate_from = load_weights(args.load)
+        weights, rate_from = load_weights(Path(args.load) / "weights.json")
         weights = np.array(weights)
-        print(f"Loaded weights from {args.load} (rates from {rate_from})")
+        print(f"Loaded {args.load}")
     else:
-        rate_from = args.rate_from
-        policy = train(
-            cartpole,
-            args.batches,
-            args.batch_size,
-            args.learning_rate,
-            args.gamma,
-            rate_from,
-            rng,
-            seed=args.seed,
-        )
-        weights = policy.weights
-        save_weights(args.save, weights, rate_from)
-        print(f"Saved weights to {args.save}")
+        info = {
+            "started": datetime.datetime.now().astimezone().isoformat("T", "seconds")
+        }
+        commit, dirty = git_version()
+        cartpole = CartPole.make(angle_limit=None)  # standard CartPole
+        start = time.perf_counter()
+        policy, curve = train(cartpole, config, np.random.default_rng(config.seed))
+        info["training_seconds"] = round(time.perf_counter() - start, 2)
+        info["git_commit"], info["git_dirty"] = commit, dirty
+        cartpole.close()
+        weights, rate_from = policy.weights, config.rate_from
 
     print()
     print_comparison(weights)
-    lengths = evaluate(cartpole, weights, rate_from, args.eval_episodes)
+    cartpole = CartPole.make(angle_limit=None)
+    lengths = evaluate(cartpole, weights, rate_from, config.eval_episodes, config.seed)
+    cartpole.close()
     print()
     print(
-        f"Without sampling, over {args.eval_episodes} episodes: mean "
+        f"Without sampling, over {config.eval_episodes} episodes: mean "
         f"{np.mean(lengths):.1f} steps, shortest {min(lengths)}, longest "
         f"{max(lengths)} (limit {cartpole.max_steps})"
     )
-    cartpole.close()
+
+    if not args.load:
+        save_run(
+            args.run_dir, config, weights, curve, lengths, cartpole.max_steps, info
+        )
+        print(f"Saved the run to {os.path.relpath(args.run_dir)}")
 
     if not args.no_window:
         cartpole = CartPole.make(render_mode="human", slow=args.slow, angle_limit=None)

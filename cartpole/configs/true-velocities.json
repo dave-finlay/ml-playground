@@ -1,0 +1,4 @@
+{
+  "description": "As standard, but the policy sees the true velocities instead of differences",
+  "rate_from": "velocity"
+}

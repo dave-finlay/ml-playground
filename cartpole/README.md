@@ -49,11 +49,22 @@ A controller is a function (or callable object) from state to force.
   then drive the cart back. `--kv` (N·s/m, default 0) adds a term on
   the cart's velocity, which damps the cart's motion. `--rate-from` and
   `--d-smoothing` apply to both rates, the angle's and the cart's.
+- `learned` (`LinearController`): weights learned by `train.py` (see
+  below), from the weights file given with `--weights`. It pushes
+  `--max-force` newtons right when weights · (cart position, its rate,
+  pole angle, its rate) ≥ 0 and left otherwise. The rates are estimated
+  the way the weights were trained (differences or true velocities), as
+  recorded in the weights file.
+
+The rate estimation (differencing and smoothing) lives in
+`RateEstimator`, shared by the PD and learned controllers and by
+training.
 
 Options a controller doesn't use are rejected rather than silently
-ignored: `--kp` and `--max-force` need `--controller p` or `pd`, and
-`--kd`, `--kx`, `--kv`, `--rate-from` and `--d-smoothing` need
-`--controller pd`.
+ignored: `--kp` needs `--controller p` or `pd`; `--max-force` needs
+`p`, `pd` or `learned`; `--kd`, `--kx`, `--kv`, `--rate-from` and
+`--d-smoothing` need `--controller pd`; and `--weights` goes with
+`--controller learned`.
 
 ```sh
 uv run python cartpole/cartpole.py              # open a window and watch
@@ -224,3 +235,114 @@ faster, and with an offset it parks closer to the centre (the parking
 spot is −Kp × offset / Kx: −0.44 m instead of −0.70 m for 1°). To
 explore from either, change one gain at a time and keep Kx small
 compared with Kp.
+
+## train.py: a learned controller
+
+`train.py` learns a controller with REINFORCE, the simplest
+policy-gradient method, written from scratch in numpy. The policy is
+linear: given s = (cart position, its rate, pole angle, its rate), it
+pushes right with probability sigmoid(w · s) and left otherwise, always
+at the full 10 N. The rates are estimated by differencing successive
+positions and angles by default, like the hand-tuned controllers
+(`rate_from`).
+
+Each batch plays a few episodes with the current weights, sampling each
+push, then makes one update:
+
+1. Work out each step's discounted return, G_t = r_t + γ·G_{t+1} (the
+   reward is 1 per step).
+2. Standardize the returns over the whole batch to get advantages A_t:
+   positive for steps followed by better-than-average returns.
+3. Step the weights uphill: w ← w + α · mean over all steps of
+   A_t · (a_t − p_t) · s_t, where a_t is 1 for a push right and p_t is
+   the probability the policy gave it.
+
+Training starts from zero weights (a coin toss each step) on standard
+CartPole (12°, 2.4 m, 500 steps). Afterwards the policy is tested
+without sampling, always taking the likelier push: that's
+`LinearController`, so the weights play the roles of the PD gains Kx,
+Kv, Kp and Kd. Only their ratios matter, since only the sign of w · s
+is used, so the printout scales them to Kp = 20 to compare with the
+gentle PD gains.
+
+### Settings, configs and runs
+
+Every setting has a built-in default, which a JSON config file
+(`--config`) overrides, which a command-line option overrides in turn.
+Unknown keys and values of the wrong type are errors. The settings are
+declared once, in `TrainConfig`, and `config.py` generates the
+command-line options from it (`learning_rate` becomes
+`--learning-rate`); `--help` lists them.
+
+| Setting | Default | |
+|---|---|---|
+| `description` | empty | what the configuration is for |
+| `seed` | none | seeds training and the test episodes; none differs each run |
+| `rate_from` | `difference` | `difference` or `velocity` (the true velocities) |
+| `batches` | 200 | number of updates |
+| `batch_size` | 10 | episodes per update |
+| `learning_rate` | 10 | step size α |
+| `gamma` | 0.99 | discount factor γ |
+| `eval_episodes` | 20 | test episodes without sampling |
+
+Configs worth keeping go in `configs/`. A config file only needs the
+settings it changes:
+
+- `standard.json`: the defaults, written out in full
+- `true-velocities.json`: the policy sees the true velocities
+
+Each training run is saved in its own directory under `runs/` (ignored
+by git), named by `--run-name` or after the config file and the time:
+
+- `config.json`: every setting the run used. It's a config file, so
+  `--config runs/NAME/config.json` repeats the run exactly when the
+  seed is set.
+- `weights.json`: the learned weights and their `rate_from`, for
+  `cartpole.py --controller learned --weights`
+- `curve.csv`: the learning curve, one row per batch: episodes so far,
+  the batch's mean, shortest and longest episode, and the weights
+- `results.json`: when it ran, how long training took, the git commit
+  (and whether there were uncommitted changes), the test results, and
+  the weights scaled to Kp = 20
+
+`--load runs/NAME` skips training and tests and shows a saved run with
+its saved settings.
+
+```sh
+uv run python cartpole/train.py                                  # defaults
+uv run python cartpole/train.py --config cartpole/configs/true-velocities.json
+uv run python cartpole/train.py --seed 3 --learning-rate 1 --run-name slow-lr
+uv run python cartpole/train.py --config cartpole/runs/slow-lr/config.json --run-name slow-lr-again
+uv run python cartpole/train.py --load cartpole/runs/slow-lr --slow 4
+uv run python cartpole/cartpole.py --controller learned --weights cartpole/runs/slow-lr/weights.json
+```
+
+### Results so far
+
+With the defaults, training takes about 2.5 s, the mean episode rises
+from about 25 steps to about 400, and the policy without sampling
+usually lasts all 500 steps in every test episode. Scaled to Kp = 20,
+seeds land near Kx ≈ −1.5 to 0, Kv ≈ 5, Kd ≈ 28 to 32, against the
+gentle gains' 0.5, 1 and 3. Standard CartPole is easy enough that many
+weightings score perfectly (even bang-bang angle-only PD), so nothing
+pins the weights down; the rate weights get a head start because the
+rates are bigger numbers than the positions; and in 10 s the cart never
+drifts far enough for Kx to matter. With longer training the ratios
+keep moving slowly (Kd falls to about 19 by 1000 batches) and the
+weights keep growing, so the policy becomes more certain.
+
+On `cartpole.py`'s 5 m track and 20 s, many learned controllers drift
+off the track (no Kx), and with 1° of angle noise they all fail within
+a few seconds: their large Kd multiplies the noise that differencing
+amplifies. Training never saw either condition.
+
+## Tests
+
+`tests/` checks the logic that would fail silently rather than crash:
+the config rules (precedence, unknown keys, types, choices), the rate
+estimation, the controllers (including that scaling the learned weights
+doesn't change the pushes), the REINFORCE maths (returns by hand, the
+gradient of log π against a numerical derivative, a policy gradient
+worked by hand), that seeded training repeats exactly, and that
+training learns at all. Run them from the repo root with
+`uv run pytest`; they take about a second.
