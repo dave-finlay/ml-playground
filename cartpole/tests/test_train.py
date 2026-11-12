@@ -19,6 +19,7 @@ from train import (
 )
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs" / "train"
+MODELS_DIR = Path(__file__).parent.parent / "models"
 
 
 def test_discounted_returns_by_hand():
@@ -111,6 +112,16 @@ def test_train_config_rejects_out_of_range(changes):
 @pytest.mark.parametrize("path", sorted(CONFIGS_DIR.glob("*.json")), ids=str)
 def test_committed_configs_load(path):
     load_config(path, TrainConfig)
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted(MODELS_DIR.glob("*/train-config.json")),
+    ids=str,
+)
+def test_model_training_configs_load(path):
+    config = load_config(path, TrainConfig)
+    assert config.seed is not None  # so the weights can be regenerated
 
 
 def test_standard_config_matches_the_defaults():

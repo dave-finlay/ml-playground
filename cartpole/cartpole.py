@@ -356,11 +356,26 @@ class PDController:
         return clamp(force, self.max_force)
 
 
+# What each of a LinearController's four weights multiplies, in order.
+WEIGHT_INPUTS = [
+    "cart position (m)",
+    "cart position rate (m/s)",
+    "pole angle (rad)",
+    "pole angle rate (rad/s)",
+]
+
+
 def save_weights(path, weights, rate_from):
-    """Save a LinearController's weights, and how the rates they were
-    learned with were estimated, as JSON."""
+    """Save a LinearController's weights as JSON, with what each one
+    multiplies (only for people reading the file) and how the rates they
+    were learned with were estimated."""
+    saved = {
+        "weights": [float(w) for w in weights],
+        "inputs": WEIGHT_INPUTS,
+        "rate_from": rate_from,
+    }
     with open(path, "w") as f:
-        json.dump({"weights": list(weights), "rate_from": rate_from}, f, indent=2)
+        json.dump(saved, f, indent=2)
         f.write("\n")
 
 

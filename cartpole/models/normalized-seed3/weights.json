@@ -1,0 +1,15 @@
+{
+  "weights": [
+    3.059424037409625,
+    0.7115873977527679,
+    29.855761634303658,
+    2.6785421075223246
+  ],
+  "inputs": [
+    "cart position (m)",
+    "cart position rate (m/s)",
+    "pole angle (rad)",
+    "pole angle rate (rad/s)"
+  ],
+  "rate_from": "difference"
+}

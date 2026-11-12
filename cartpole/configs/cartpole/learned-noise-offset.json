@@ -1,0 +1,7 @@
+{
+  "description": "Learned controller (normalized REINFORCE, seed 3), staying well controlled despite 1 degree of angle noise and a 1 degree offset",
+  "controller": "learned",
+  "weights": "cartpole/models/normalized-seed3/weights.json",
+  "angle_noise": 1.0,
+  "angle_offset": 1.0
+}

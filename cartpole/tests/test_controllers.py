@@ -1,5 +1,6 @@
 """Tests for cartpole.py's rate estimation and controllers."""
 
+import json
 import random
 from pathlib import Path
 
@@ -125,6 +126,15 @@ def test_weights_file_round_trip(tmp_path):
 def test_committed_simulation_configs_load(path):
     config = load_config(path, SimulationConfig)
     check_controller_settings(config, load_config_file(path, SimulationConfig))
+    locate_weights(config, from_config_file=True)  # the weights file exists
+
+
+def test_weights_file_names_its_inputs(tmp_path):
+    path = tmp_path / "weights.json"
+    save_weights(path, [1, 2, 3, 4], "difference")
+    saved = json.loads(path.read_text())
+    assert saved["inputs"][2] == "pole angle (rad)"
+    assert len(saved["inputs"]) == len(saved["weights"])
 
 
 @pytest.mark.parametrize(

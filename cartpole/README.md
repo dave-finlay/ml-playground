@@ -79,10 +79,26 @@ in `configs/cartpole/`:
 - `pd-noise-offset.json`: the gentle PD gains with cart feedback and a
   little D smoothing (Kp 20, Kd 3, Kx 0.5, Kv 1, smoothing 0.1), staying
   well controlled with 1° of angle noise and a 1° offset
+- `learned-noise-offset.json`: the same conditions with a learned
+  controller, the trained model in `models/normalized-seed3/`
+
+Trained models worth keeping, for configs to point at, go in
+`models/NAME/`, which is tracked by git (`runs/` isn't, so a config
+pointing into `runs/` only works where that run exists). Each is a kept
+copy of a training run's two key files: `weights.json`, the learned
+weights, and `train-config.json`, the training settings that made them
+(the run's `config.json`, renamed so it isn't mistaken for a
+`cartpole.py` config). Since it includes the seed, it regenerates the
+weights exactly:
+`train.py --config cartpole/models/NAME/train-config.json`.
+So the layout is: settings you write in `configs/` (`train/` for
+`train.py`, `cartpole/` for `cartpole.py`), results worth keeping in
+`models/`, and every training run in `runs/`.
 
 ```sh
 uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noise-offset.json
 uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noise-offset.json --angle-noise 2
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/learned-noise-offset.json
 uv run python cartpole/cartpole.py              # open a window and watch
 uv run python cartpole/cartpole.py --slow 4     # quarter speed
 uv run python cartpole/cartpole.py --seed 7     # repeatable starting state
@@ -319,8 +335,10 @@ by git), named by `--run-name` or after the config file and the time:
 - `config.json`: every setting the run used. It's a config file, so
   `--config runs/NAME/config.json` repeats the run exactly when the
   seed is set.
-- `weights.json`: the learned weights and their `rate_from`, for
-  `cartpole.py --controller learned --weights`
+- `weights.json`: the learned weights, in the order cart position,
+  its rate, pole angle, its rate (listed in the file's `inputs`) and in
+  those inputs' own units even when training normalized them, with
+  their `rate_from`, for `cartpole.py --controller learned --weights`
 - `curve.csv`: the learning curve, one row per batch: episodes so far,
   the batch's mean, shortest and longest episode, and the weights
 - `results.json`: when it ran, how long training took, the git commit
