@@ -16,6 +16,16 @@ method:
    and standardize the returns over the batch to get advantages A_t.
 3. Step the weights uphill: w += learning_rate * mean(A_t (a_t - p_t) s_t).
 
+Each weight's step is proportional to its input, and the inputs come in
+very different sizes (the angle's rate is typically about 9 times the
+angle), so with one learning rate the weights on bigger inputs learn
+faster. With normalize_inputs, the policy sees each input divided by its
+typical size (its standard deviation in coin-toss episodes, measured
+before training), so all four learn at comparable rates. That doesn't
+change which controllers it can express: weights w' on s / scales are
+weights w' / scales on s, and the weights are converted back like that
+for printing and saving.
+
 Training uses standard CartPole: 12 degrees, 2.4 m and 500 steps (10 s).
 Afterwards the trained policy plays without sampling, always taking the
 likelier action, which makes it a controller like the hand-tuned ones in
@@ -36,7 +46,7 @@ training run is saved in its own directory under cartpole/runs/:
 Run from the repo root:
 
     uv run python cartpole/train.py
-    uv run python cartpole/train.py --config cartpole/configs/standard.json --seed 3
+    uv run python cartpole/train.py --config cartpole/configs/train/normalized.json
     uv run python cartpole/train.py --learning-rate 1 --run-name slow-learning
     uv run python cartpole/train.py --load cartpole/runs/slow-learning
     uv run python cartpole/cartpole.py --controller learned \\
@@ -75,6 +85,7 @@ from config import (
 )
 
 FORCE = 10.0  # standard CartPole's push, in newtons
+SCALE_EPISODES = 20  # coin-toss episodes for measuring input scales
 RUNS_DIR = Path(__file__).parent / "runs"
 
 # The hand-tuned "gentle" gains from cartpole.py's PD controller, for
@@ -103,6 +114,11 @@ class TrainConfig:
         "where the policy's rates of change come from: differences of "
         "successive positions and angles, or the true velocities",
         choices=("difference", "velocity"),
+    )
+    normalize_inputs: bool = setting(
+        False,
+        "divide each input by its typical size, measured in coin-toss episodes "
+        "before training, so all four weights learn at comparable rates",
     )
     batches: int = setting(200, "number of weight updates")
     batch_size: int = setting(10, "episodes played per update")
@@ -162,12 +178,13 @@ class LinearPolicy:
         return action, p
 
 
-def play_episode(cartpole, policy, rate_from, rng, seed=None):
+def play_episode(cartpole, policy, rate_from, rng, seed=None, scales=None):
     """Play one episode, sampling actions from policy.
 
     The policy's inputs come from the state through a RateEstimator, so
     with rate_from "difference" it sees the rates the way cartpole.py's
-    controllers estimate them.
+    controllers estimate them. If scales is given, each input is divided
+    by its scale.
 
     Returns (inputs, actions, probs, rewards), one entry per step: what
     the policy saw, the action (1 right, 0 left), the probability of
@@ -179,6 +196,8 @@ def play_episode(cartpole, policy, rate_from, rng, seed=None):
     terminated = truncated = False
     while not (terminated or truncated):
         seen = np.array(rates.update(state))
+        if scales is not None:
+            seen = seen / scales
         action, p = policy.sample(seen, rng)
         inputs.append(seen)
         actions.append(action)
@@ -208,14 +227,42 @@ def policy_gradient(episodes, gamma):
     return ((advantages * (actions - probs))[:, None] * inputs).mean(axis=0)
 
 
+def measure_input_scales(cartpole, rate_from, rng, episodes, seed=None):
+    """Return the standard deviation of each of the policy's inputs over
+    episodes of coin-toss pushing, the way training starts."""
+    coin_toss = LinearPolicy(np.zeros(4))
+    inputs = np.concatenate(
+        [
+            play_episode(cartpole, coin_toss, rate_from, rng, seed if i == 0 else None)[
+                0
+            ]
+            for i in range(episodes)
+        ]
+    )
+    scales = inputs.std(axis=0)
+    return np.where(scales > 0, scales, 1.0)
+
+
 def train(cartpole, config, rng, report_every=10):
     """Train a LinearPolicy, starting from all-zero weights (a coin toss
-    every step), and return (policy, curve).
+    every step), and return (weights, curve, scales).
+
+    weights are the learned weights, in the inputs' own units even when
+    training normalized them. scales are what the inputs were divided by
+    (all 1 without normalize_inputs).
 
     curve has one row per batch: (batch, episodes so far, mean, shortest
     and longest episode in the batch, then the four weights after the
-    batch's update). Every report_every batches, the row is also printed.
+    batch's update, in the inputs' own units). Every report_every batches,
+    the row is also printed.
     """
+    if config.normalize_inputs:
+        scales = measure_input_scales(
+            cartpole, config.rate_from, rng, SCALE_EPISODES, config.seed
+        )
+        print("Input scales (x, x rate, angle, angle rate):", np.round(scales, 3))
+    else:
+        scales = np.ones(4)
     policy = LinearPolicy(np.zeros(4))
     curve = []
     print(
@@ -227,9 +274,12 @@ def train(cartpole, config, rng, report_every=10):
         for i in range(config.batch_size):
             episode_seed = config.seed if batch == 1 and i == 0 else None
             episodes.append(
-                play_episode(cartpole, policy, config.rate_from, rng, episode_seed)
+                play_episode(
+                    cartpole, policy, config.rate_from, rng, episode_seed, scales
+                )
             )
         policy.weights += config.learning_rate * policy_gradient(episodes, config.gamma)
+        weights = policy.weights / scales
         lengths = [len(r) for _, _, _, r in episodes]
         row = (
             batch,
@@ -237,16 +287,15 @@ def train(cartpole, config, rng, report_every=10):
             float(np.mean(lengths)),
             min(lengths),
             max(lengths),
-            *policy.weights.tolist(),
+            *weights.tolist(),
         )
         curve.append(row)
         if batch % report_every == 0 or batch == 1 or batch == config.batches:
-            weights = " ".join(f"{w:7.3f}" for w in policy.weights)
+            shown = " ".join(f"{w:7.3f}" for w in weights)
             print(
-                f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  "
-                f"{weights}"
+                f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  {shown}"
             )
-    return policy, curve
+    return weights, curve, scales
 
 
 def evaluate(cartpole, weights, rate_from, episodes, seed=None):
@@ -344,7 +393,8 @@ def save_run(run_dir, config, weights, curve, lengths, max_steps, info):
     """Save everything about a training run in a new directory run_dir.
 
     info holds what else to record in results.json: when the run started,
-    how long training took and the git version of the code.
+    how long training took, the git version of the code and the input
+    scales.
     """
     run_dir.mkdir(parents=True)
     save_config(run_dir / "config.json", config)
@@ -372,7 +422,7 @@ def parse_args():
         "--config",
         dest="config_file",
         default=None,
-        help="JSON file of settings, e.g. from cartpole/configs/ or a run's "
+        help="JSON file of settings, e.g. from cartpole/configs/train/ or a run's "
         "config.json",
     )
     parser.add_argument(
@@ -439,11 +489,14 @@ def main():
         commit, dirty = git_version()
         cartpole = CartPole.make(angle_limit=None)  # standard CartPole
         start = time.perf_counter()
-        policy, curve = train(cartpole, config, np.random.default_rng(config.seed))
+        weights, curve, scales = train(
+            cartpole, config, np.random.default_rng(config.seed)
+        )
         info["training_seconds"] = round(time.perf_counter() - start, 2)
         info["git_commit"], info["git_dirty"] = commit, dirty
+        info["input_scales"] = scales.tolist() if config.normalize_inputs else None
         cartpole.close()
-        weights, rate_from = policy.weights, config.rate_from
+        rate_from = config.rate_from
 
     print()
     print_comparison(weights)

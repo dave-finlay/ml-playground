@@ -18,7 +18,7 @@ from train import (
     train,
 )
 
-CONFIGS_DIR = Path(__file__).parent.parent / "configs"
+CONFIGS_DIR = Path(__file__).parent.parent / "configs" / "train"
 
 
 def test_discounted_returns_by_hand():
@@ -120,23 +120,50 @@ def test_standard_config_matches_the_defaults():
 
 def run_training(config, capsys):
     cartpole = CartPole.make(angle_limit=None)
-    policy, curve = train(cartpole, config, np.random.default_rng(config.seed))
+    weights, curve, scales = train(cartpole, config, np.random.default_rng(config.seed))
     cartpole.close()
     capsys.readouterr()  # discard the printed learning curve
-    return policy, curve
+    return weights, curve, scales
 
 
 def test_training_with_a_seed_is_repeatable(capsys):
     config = TrainConfig(seed=5, batches=3, batch_size=2)
-    first_policy, first_curve = run_training(config, capsys)
-    second_policy, second_curve = run_training(config, capsys)
-    assert first_policy.weights.tolist() == second_policy.weights.tolist()
+    first_weights, first_curve, _ = run_training(config, capsys)
+    second_weights, second_curve, _ = run_training(config, capsys)
+    assert first_weights.tolist() == second_weights.tolist()
     assert first_curve == second_curve
 
 
 def test_training_learns(capsys):
     """A loose check that the algorithm works at all: after 50 batches,
     episodes last much longer than the coin-toss start."""
-    _, curve = run_training(TrainConfig(seed=3, batches=50), capsys)
+    _, curve, _ = run_training(TrainConfig(seed=3, batches=50), capsys)
+    mean_lengths = [row[2] for row in curve]
+    assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])
+
+
+def test_scales_are_one_without_normalization(capsys):
+    _, _, scales = run_training(TrainConfig(seed=1, batches=1), capsys)
+    assert scales.tolist() == [1.0, 1.0, 1.0, 1.0]
+
+
+def test_normalized_inputs_express_the_same_controller():
+    """Weights w' on inputs divided by scales act exactly like weights
+    w' / scales on the raw inputs, which is how normalized weights are
+    converted back for saving."""
+    rng = np.random.default_rng(2)
+    scales = np.array([0.07, 0.5, 0.09, 0.7])
+    normalized_weights = rng.normal(size=4)
+    for _ in range(100):
+        inputs = rng.normal(size=4) * scales
+        assert LinearPolicy(normalized_weights).prob_right(
+            inputs / scales
+        ) == pytest.approx(LinearPolicy(normalized_weights / scales).prob_right(inputs))
+
+
+def test_normalized_training_learns(capsys):
+    config = TrainConfig(seed=3, batches=50, normalize_inputs=True, learning_rate=3.0)
+    _, curve, scales = run_training(config, capsys)
+    assert (scales > 0).all() and (scales != 1.0).all()
     mean_lengths = [row[2] for row in curve]
     assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])

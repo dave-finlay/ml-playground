@@ -1,6 +1,7 @@
 """Tests for cartpole.py's rate estimation and controllers."""
 
 import random
+from pathlib import Path
 
 import pytest
 
@@ -9,12 +10,17 @@ from cartpole import (
     LinearController,
     PDController,
     RateEstimator,
+    SimulationConfig,
     Smoother,
+    check_controller_settings,
     load_weights,
+    make_controller,
     save_weights,
 )
+from config import load_config, load_config_file
 
 DT = 0.02
+CONFIGS_DIR = Path(__file__).parent.parent / "configs" / "cartpole"
 
 
 def test_differencer_first_rate_is_zero_then_slope():
@@ -111,3 +117,47 @@ def test_weights_file_round_trip(tmp_path):
     path = tmp_path / "weights.json"
     save_weights(path, [-0.1, 1.2, 4.3, 6.0], "velocity")
     assert load_weights(path) == ([-0.1, 1.2, 4.3, 6.0], "velocity")
+
+
+@pytest.mark.parametrize("path", sorted(CONFIGS_DIR.glob("*.json")), ids=str)
+def test_committed_simulation_configs_load(path):
+    config = load_config(path, SimulationConfig)
+    check_controller_settings(config, load_config_file(path, SimulationConfig))
+
+
+@pytest.mark.parametrize(
+    "controller, given, message",
+    [
+        ("p", {"kd": 3.0}, "--kd needs controller pd"),
+        ("none", {"max_force": 5.0}, "--max-force needs controller p or"),
+        ("pd", {"weights": "w.json"}, "--weights needs controller learned"),
+        ("learned", {"rate_from": "velocity"}, "--rate-from needs controller pd"),
+        ("learned", {}, "needs --weights"),
+    ],
+)
+def test_settings_the_controller_does_not_use_are_rejected(controller, given, message):
+    config = SimulationConfig(controller=controller, **given)
+    with pytest.raises(ValueError, match=message):
+        check_controller_settings(config, {"controller": controller, **given})
+
+
+def test_settings_left_at_their_defaults_are_not_rejected():
+    # kd has a default, but wasn't asked for, so controller p is fine.
+    check_controller_settings(SimulationConfig(controller="p"), {"controller": "p"})
+
+
+def test_make_controller_uses_the_settings():
+    config = SimulationConfig(
+        controller="pd", kp=20, kd=3, kx=0.5, kv=1, rate_from="velocity"
+    )
+    controller = make_controller(config, DT)
+    assert controller((1.0, -1.0, 0.1, 0.5)) == pytest.approx(3.0)
+
+
+def test_make_controller_learned_reads_weights(tmp_path):
+    path = tmp_path / "weights.json"
+    save_weights(path, [0, 0, 1, 0], "velocity")
+    controller = make_controller(
+        SimulationConfig(controller="learned", weights=str(path), max_force=4), DT
+    )
+    assert controller((0, 0, -0.1, 0)) == -4

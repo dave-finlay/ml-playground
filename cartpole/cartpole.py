@@ -29,14 +29,28 @@ Run from the repo root:
     uv run python cartpole/cartpole.py --controller pd --kx 0.5 --kv 1 --max-steps 3000
     uv run python cartpole/cartpole.py --controller learned \
         --weights cartpole/runs/RUN/weights.json
+    uv run python cartpole/cartpole.py \
+        --config cartpole/configs/cartpole/pd-noise-offset.json
+
+Settings come from built-in defaults, overridden by a JSON config file
+(--config), overridden by command-line options; see config.py.
 """
 
 import argparse
+import dataclasses
 import json
 import math
 import random
 
 import gymnasium as gym
+
+from config import (
+    add_setting_options,
+    given_values,
+    make_config,
+    option_name,
+    setting,
+)
 
 
 def clamp(value, limit):
@@ -466,40 +480,137 @@ def print_summary(states, tau, angle_limit, track_limit):
     print(f"Stopped after {t:.2f} s ({steps} steps of {tau} s): {reason}.")
 
 
-# Options that only some controllers use: option name -> (controllers
-# that use it, default). Given with any other controller, it's an error
-# rather than being silently ignored.
-CONTROLLER_OPTIONS = {
-    "kp": (("p", "pd"), 20.0),
-    "max_force": (("p", "pd", "learned"), 10.0),
-    "kd": (("pd",), 3.0),
-    "rate_from": (("pd",), "difference"),  # learned: from the weights file
-    "d_smoothing": (("pd",), 0.0),
-    "kx": (("pd",), 0.0),
-    "kv": (("pd",), 0.0),
+@dataclasses.dataclass(frozen=True)
+class SimulationConfig:
+    """Everything that decides what a simulation run does: the controller,
+    the sensor and when the episode ends. Angles are in degrees here, as
+    on the command line."""
+
+    description: str = setting("", "what this configuration is for")
+    seed: int | None = setting(
+        None,
+        "random seed for the starting state and the sensor noise; none gives a "
+        "different run each time",
+    )
+    controller: str = setting(
+        "none",
+        "none: never push; p: push proportional to the pole angle; pd: "
+        "proportional to the angle plus its rate of change; learned: full "
+        "force left or right, by weights from --weights",
+        choices=("none", "p", "pd", "learned"),
+    )
+    weights: str | None = setting(
+        None, "learned controller's weights file, saved by train.py"
+    )
+    kp: float = setting(
+        20.0, "p and pd controllers' proportional gain, in newtons per radian"
+    )
+    kd: float = setting(
+        3.0, "pd controller's derivative gain, in newtons per radian per second"
+    )
+    rate_from: str = setting(
+        "difference",
+        "where the pd controller gets rates of change: differences of "
+        "successive readings, or the true velocities, like perfect rate "
+        "sensors (the learned controller takes it from its weights file)",
+        choices=("difference", "velocity"),
+    )
+    d_smoothing: float = setting(
+        0.0,
+        "pd controller's smoothing of rates of change, from 0 (none) to just "
+        "under 1 (heavy): the weight an exponential moving average gives the "
+        "previous smoothed value",
+    )
+    kx: float = setting(
+        0.0,
+        "pd controller's gain on cart position, in newtons per metre; positive "
+        "keeps the cart near the centre",
+    )
+    kv: float = setting(
+        0.0,
+        "pd controller's gain on cart velocity, in newtons per metre per "
+        "second; positive damps the cart's motion",
+    )
+    max_force: float = setting(
+        10.0, "largest push the controller may apply, in newtons"
+    )
+    angle_noise: float = setting(
+        0.0, "angle sensor noise: standard deviation in degrees"
+    )
+    angle_scale: float = setting(
+        1.0,
+        "angle sensor scale error: reading = scale x true angle, e.g. 1.05 "
+        "reads 5% high",
+    )
+    angle_offset: float = setting(
+        0.0, "angle sensor offset error in degrees, added to every reading"
+    )
+    track_limit: float = setting(
+        5.0,
+        "how far the cart may go from the centre, in metres (standard CartPole: 2.4)",
+    )
+    max_steps: int = setting(
+        1000, "longest episode, in steps of 0.02 s (standard CartPole: 500)"
+    )
+
+
+# Settings that only some controllers use, and which controllers use them.
+# Given with any other controller, in a config file or on the command line,
+# they're an error rather than being silently ignored.
+CONTROLLER_SETTINGS = {
+    "weights": ("learned",),
+    "kp": ("p", "pd"),
+    "max_force": ("p", "pd", "learned"),
+    "kd": ("pd",),
+    "rate_from": ("pd",),
+    "d_smoothing": ("pd",),
+    "kx": ("pd",),
+    "kv": ("pd",),
 }
 
 
-def apply_controller_options(parser, args):
-    """Reject controller options the chosen controller doesn't use, and fill
-    in defaults for the ones it does."""
-    for name, (controllers, default) in CONTROLLER_OPTIONS.items():
-        value = getattr(args, name)
-        if value is None:
-            setattr(args, name, default)
-        elif args.controller not in controllers:
-            option = "--" + name.replace("_", "-")
-            needs = " or ".join(f"--controller {c}" for c in controllers)
-            parser.error(f"{option} needs {needs}")
+def check_controller_settings(config, given):
+    """Raise ValueError if given (the settings asked for in the config file
+    or on the command line) includes one config's controller doesn't use,
+    or if the learned controller has no weights file."""
+    for name, controllers in CONTROLLER_SETTINGS.items():
+        if name in given and config.controller not in controllers:
+            needs = " or ".join(f"controller {c}" for c in controllers)
+            raise ValueError(f"{option_name(name)} needs {needs}")
+    if config.controller == "learned" and config.weights is None:
+        raise ValueError("controller learned needs --weights")
+
+
+def make_controller(config, dt):
+    """Build the controller config asks for. dt is the time step."""
+    if config.controller == "p":
+        return PController(config.kp, max_force=config.max_force)
+    if config.controller == "pd":
+        return PDController(
+            config.kp,
+            config.kd,
+            dt=dt,
+            max_force=config.max_force,
+            rate_from=config.rate_from,
+            smoothing=config.d_smoothing,
+            kx=config.kx,
+            kv=config.kv,
+        )
+    if config.controller == "learned":
+        weights, rate_from = load_weights(config.weights)
+        return LinearController(
+            weights, dt=dt, max_force=config.max_force, rate_from=rate_from
+        )
+    return no_control
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "--seed",
-        type=int,
+        "--config",
+        dest="config_file",
         default=None,
-        help="random seed for the starting state (default: different each run)",
+        help="JSON file of settings, e.g. from cartpole/configs/cartpole/",
     )
     parser.add_argument(
         "--slow",
@@ -508,149 +619,40 @@ def parse_args():
         help="slow-motion factor, e.g. 4 plays at quarter speed (default: 1)",
     )
     parser.add_argument(
-        "--controller",
-        choices=["none", "p", "pd", "learned"],
-        default="none",
-        help="none: never push; p: push proportional to the pole angle; pd: "
-        "proportional to the angle plus its rate of change; learned: full "
-        "force left or right, by weights from --weights (default: none)",
-    )
-    parser.add_argument(
-        "--weights",
-        default=None,
-        help="learned controller's weights file, saved by train.py",
-    )
-    parser.add_argument(
-        "--kp",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="p and pd controllers' proportional gain, in newtons per radian of "
-        "lean (default: 20)",
-    )
-    parser.add_argument(
-        "--kd",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="pd controller's derivative gain, in newtons per radian per second "
-        "(default: 3)",
-    )
-    parser.add_argument(
-        "--rate-from",
-        choices=["difference", "velocity"],
-        default=None,  # see CONTROLLER_OPTIONS
-        help="where the pd controller gets rates of change: differences of "
-        "successive readings, or the true velocities, like perfect rate "
-        "sensors (default: difference)",
-    )
-    parser.add_argument(
-        "--d-smoothing",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="pd controller's smoothing of rates of change, from 0 (none) to "
-        "just under 1 (heavy): the weight an exponential moving average gives "
-        "the previous smoothed value (default: 0)",
-    )
-    parser.add_argument(
-        "--kx",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="pd controller's gain on cart position, in newtons per metre; "
-        "positive keeps the cart near the centre (default: 0)",
-    )
-    parser.add_argument(
-        "--kv",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="pd controller's gain on cart velocity, in newtons per metre per "
-        "second; positive damps the cart's motion (default: 0)",
-    )
-    parser.add_argument(
-        "--max-force",
-        type=float,
-        default=None,  # see CONTROLLER_OPTIONS
-        help="largest push the controller may apply, in newtons (default: 10)",
-    )
-    parser.add_argument(
-        "--angle-noise",
-        type=float,
-        default=0.0,
-        help="angle sensor noise: standard deviation in degrees (default: 0)",
-    )
-    parser.add_argument(
-        "--angle-scale",
-        type=float,
-        default=1.0,
-        help="angle sensor scale error: reading = scale x true angle, e.g. 1.05 "
-        "reads 5%% high (default: 1)",
-    )
-    parser.add_argument(
-        "--angle-offset",
-        type=float,
-        default=0.0,
-        help="angle sensor offset error in degrees, added to every reading "
-        "(default: 0)",
-    )
-    parser.add_argument(
-        "--track-limit",
-        type=float,
-        default=5.0,
-        help="how far the cart may go from the centre, in metres (default: 5; "
-        "standard CartPole: 2.4)",
-    )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=1000,
-        help="longest episode, in steps of 0.02 s (default: 1000, i.e. 20 s; "
-        "standard CartPole: 500)",
-    )
-    parser.add_argument(
         "--no-window",
         action="store_true",
         help="don't open a window, just print the trace",
     )
+    add_setting_options(parser, SimulationConfig)
     args = parser.parse_args()
-    apply_controller_options(parser, args)
-    if (args.controller == "learned") != (args.weights is not None):
-        parser.error("--controller learned and --weights go together")
+    try:
+        given = given_values(SimulationConfig, args.config_file, args)
+        args.settings = make_config(SimulationConfig, given)
+        check_controller_settings(args.settings, given)
+    except (OSError, ValueError) as e:
+        parser.error(str(e))
     return args
 
 
 def main():
     args = parse_args()
+    config = args.settings
+    if config.description:
+        print(config.description)
     cartpole = CartPole.make(
         render_mode=None if args.no_window else "human",
         slow=args.slow,
-        track_limit=args.track_limit,
-        max_steps=args.max_steps,
+        track_limit=config.track_limit,
+        max_steps=config.max_steps,
     )
-    if args.controller == "p":
-        controller = PController(args.kp, max_force=args.max_force)
-    elif args.controller == "pd":
-        controller = PDController(
-            args.kp,
-            args.kd,
-            dt=cartpole.tau,
-            max_force=args.max_force,
-            rate_from=args.rate_from,
-            smoothing=args.d_smoothing,
-            kx=args.kx,
-            kv=args.kv,
-        )
-    elif args.controller == "learned":
-        weights, rate_from = load_weights(args.weights)
-        controller = LinearController(
-            weights, dt=cartpole.tau, max_force=args.max_force, rate_from=rate_from
-        )
-    else:
-        controller = no_control
+    controller = make_controller(config, cartpole.tau)
     sensor = AngleSensor(
-        scale=args.angle_scale,
-        offset=math.radians(args.angle_offset),
-        noise_std=math.radians(args.angle_noise),
-        seed=args.seed,
+        scale=config.angle_scale,
+        offset=math.radians(config.angle_offset),
+        noise_std=math.radians(config.angle_noise),
+        seed=config.seed,
     )
-    states, readings = run_simulation(cartpole, controller, sensor, seed=args.seed)
+    states, readings = run_simulation(cartpole, controller, sensor, seed=config.seed)
     cartpole.close()
     print_trace(states, readings, cartpole.tau, cartpole.normal_angle_limit)
     print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)

@@ -151,10 +151,10 @@ def given_settings(args, config_class):
     ]
 
 
-def resolve(config_class, config_file, args):
-    """Combine the defaults, the config file (if config_file isn't None)
-    and the settings given on the command line, in that order of
-    precedence from lowest to highest, into config_class."""
+def given_values(config_class, config_file, args):
+    """Return the settings given in config_file (if it isn't None) and on
+    the command line, as a dict, the command line winning. Settings given
+    in neither are left out, so a script can tell what was asked for."""
     values = {}
     if config_file is not None:
         values.update(load_config_file(config_file, config_class))
@@ -162,4 +162,11 @@ def resolve(config_class, config_file, args):
         value = getattr(args, field.name)
         if value is not None:
             values[field.name] = value
-    return make_config(config_class, values)
+    return values
+
+
+def resolve(config_class, config_file, args):
+    """Combine the defaults, the config file (if config_file isn't None)
+    and the settings given on the command line, in that order of
+    precedence from lowest to highest, into config_class."""
+    return make_config(config_class, given_values(config_class, config_file, args))

@@ -66,7 +66,20 @@ ignored: `--kp` needs `--controller p` or `pd`; `--max-force` needs
 `--d-smoothing` need `--controller pd`; and `--weights` goes with
 `--controller learned`.
 
+Settings can also come from a JSON config file (`--config`), with
+command-line options overriding it, the same way as for `train.py`
+(see below). Its keys are the option names with underscores
+(`d_smoothing` for `--d-smoothing`), and the rule about unused options
+applies to the file too. Configs worth keeping go in
+`configs/cartpole/`:
+
+- `pd-noise-offset.json`: the gentle PD gains with cart feedback and a
+  little D smoothing (Kp 20, Kd 3, Kx 0.5, Kv 1, smoothing 0.1), staying
+  well controlled with 1° of angle noise and a 1° offset
+
 ```sh
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noise-offset.json
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noise-offset.json --angle-noise 2
 uv run python cartpole/cartpole.py              # open a window and watch
 uv run python cartpole/cartpole.py --slow 4     # quarter speed
 uv run python cartpole/cartpole.py --seed 7     # repeatable starting state
@@ -279,17 +292,23 @@ command-line options from it (`learning_rate` becomes
 | `description` | empty | what the configuration is for |
 | `seed` | none | seeds training and the test episodes; none differs each run |
 | `rate_from` | `difference` | `difference` or `velocity` (the true velocities) |
+| `normalize_inputs` | false | divide each input by its typical size (see below) |
 | `batches` | 200 | number of updates |
 | `batch_size` | 10 | episodes per update |
 | `learning_rate` | 10 | step size α |
 | `gamma` | 0.99 | discount factor γ |
 | `eval_episodes` | 20 | test episodes without sampling |
 
-Configs worth keeping go in `configs/`. A config file only needs the
-settings it changes:
+Training configs worth keeping go in `configs/train/`. A config file
+only needs the settings it changes:
 
 - `standard.json`: the defaults, written out in full
 - `true-velocities.json`: the policy sees the true velocities
+- `normalized.json`: normalized inputs, with learning rate 3
+
+A new setting should default to the old behaviour, because configs
+(including saved runs' `config.json`) that leave it out get the
+default.
 
 Each training run is saved in its own directory under `runs/` (ignored
 by git), named by `--run-name` or after the config file and the time:
@@ -308,9 +327,26 @@ by git), named by `--run-name` or after the config file and the time:
 `--load runs/NAME` skips training and tests and shows a saved run with
 its saved settings.
 
+### Normalized inputs
+
+Each weight's step is proportional to its input, and the inputs come in
+very different sizes: in coin-toss episodes the angle's rate is
+typically about 8 times the angle. A term's influence on the decision,
+w × input, then grows with the square of its input's size, so with one
+learning rate the rate terms run far ahead of the others. With
+`normalize_inputs`, training first plays 20 coin-toss episodes,
+measures each input's standard deviation, and has the policy see each
+input divided by it, so all four weights learn at comparable rates. It
+doesn't change which controllers the policy can express: weights w′ on
+inputs ÷ scales are weights w′ ÷ scales on the raw inputs, which is how
+they're converted back for printing, the learning curve and
+`weights.json`. The scales go in `results.json`. They're measured with
+the run's own rate estimation, so they'll follow changes such as sensor
+noise.
+
 ```sh
 uv run python cartpole/train.py                                  # defaults
-uv run python cartpole/train.py --config cartpole/configs/true-velocities.json
+uv run python cartpole/train.py --config cartpole/configs/train/true-velocities.json
 uv run python cartpole/train.py --seed 3 --learning-rate 1 --run-name slow-lr
 uv run python cartpole/train.py --config cartpole/runs/slow-lr/config.json --run-name slow-lr-again
 uv run python cartpole/train.py --load cartpole/runs/slow-lr --slow 4
@@ -335,6 +371,24 @@ On `cartpole.py`'s 5 m track and 20 s, many learned controllers drift
 off the track (no Kx), and with 1° of angle noise they all fail within
 a few seconds: their large Kd multiplies the noise that differencing
 amplifies. Training never saw either condition.
+
+Normalizing the inputs (seeds 1 to 6, 200 batches) changes all of this:
+
+| | unnormalized, rate 10 | normalized, rate 3 |
+|---|---|---|
+| batches until a 10-batch average of 400 steps | never | 28 to 62 |
+| mean episode, last 20 batches | 375 | 492 |
+| scaled Kx, Kv, Kd, mean over seeds (gentle PD: 0.5, 1, 3) | −0.8, 5.4, 29 | 2.4, 0.3, 1.7 |
+| 5 m, 20 s, perfect sensor (6 runs × 3 seeds) | 9/18 | 18/18 |
+| same with 1° noise | 0/18 | 18/18 |
+| same with 1° offset | 7/18 | 18/18 |
+
+With the head start gone, training finds a controller much like the
+hand-tuned ones: Kd small, and Kx positive (the counter-intuitive sign)
+even though position control barely matters in 10 s. The small Kd is
+what makes it robust to noise it never trained on. Kv comes out small,
+smaller than the hand-tuned 1. Learning rates: 0.3 is slow, 1 works,
+3 is best, and 10 is unstable (one seed's policy fell to 127 steps).
 
 ## Tests
 

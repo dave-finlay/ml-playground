@@ -1,0 +1,11 @@
+{
+  "description": "Gentle PD with cart feedback, staying well controlled despite 1 degree of angle noise and a 1 degree offset",
+  "controller": "pd",
+  "kp": 20.0,
+  "kd": 3.0,
+  "d_smoothing": 0.1,
+  "kx": 0.5,
+  "kv": 1.0,
+  "angle_noise": 1.0,
+  "angle_offset": 1.0
+}
