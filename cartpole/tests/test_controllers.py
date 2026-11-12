@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import cartpole
 from cartpole import (
     Differencer,
     LinearController,
@@ -14,6 +15,7 @@ from cartpole import (
     Smoother,
     check_controller_settings,
     load_weights,
+    locate_weights,
     make_controller,
     save_weights,
 )
@@ -161,3 +163,38 @@ def test_make_controller_learned_reads_weights(tmp_path):
         SimulationConfig(controller="learned", weights=str(path), max_force=4), DT
     )
     assert controller((0, 0, -0.1, 0)) == -4
+
+
+def learned(weights):
+    return SimulationConfig(controller="learned", weights=weights)
+
+
+def test_config_file_weights_are_relative_to_the_repo_root(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    weights_file = repo / "cartpole" / "runs" / "r1" / "weights.json"
+    weights_file.parent.mkdir(parents=True)
+    save_weights(weights_file, [0, 0, 1, 0], "difference")
+    monkeypatch.setattr(cartpole, "REPO_ROOT", repo)
+    monkeypatch.chdir(tmp_path)  # anywhere but the repo root
+    config = locate_weights(
+        learned("cartpole/runs/r1/weights.json"), from_config_file=True
+    )
+    assert config.weights == str(weights_file)
+
+
+def test_command_line_weights_are_relative_to_the_current_directory(
+    tmp_path, monkeypatch
+):
+    save_weights(tmp_path / "weights.json", [0, 0, 1, 0], "difference")
+    monkeypatch.setattr(cartpole, "REPO_ROOT", tmp_path / "elsewhere")
+    monkeypatch.chdir(tmp_path)
+    config = locate_weights(learned("weights.json"), from_config_file=False)
+    assert config.weights == "weights.json"
+
+
+@pytest.mark.parametrize("from_config_file", [True, False])
+def test_missing_weights_file_is_a_clean_error(tmp_path, monkeypatch, from_config_file):
+    monkeypatch.setattr(cartpole, "REPO_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="weights file not found"):
+        locate_weights(learned("runs/nope/weights.json"), from_config_file)

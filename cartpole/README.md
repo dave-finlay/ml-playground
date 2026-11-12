@@ -70,8 +70,11 @@ Settings can also come from a JSON config file (`--config`), with
 command-line options overriding it, the same way as for `train.py`
 (see below). Its keys are the option names with underscores
 (`d_smoothing` for `--d-smoothing`), and the rule about unused options
-applies to the file too. Configs worth keeping go in
-`configs/cartpole/`:
+applies to the file too. A `weights` path in a config file is relative
+to the repo root (for example `cartpole/runs/NAME/weights.json`), so
+the config works from any directory; `--weights` on the command line is
+relative to the current directory, as usual. Configs worth keeping go
+in `configs/cartpole/`:
 
 - `pd-noise-offset.json`: the gentle PD gains with cart feedback and a
   little D smoothing (Kp 20, Kd 3, Kx 0.5, Kv 1, smoothing 0.1), staying

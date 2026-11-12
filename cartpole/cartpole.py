@@ -41,6 +41,7 @@ import dataclasses
 import json
 import math
 import random
+from pathlib import Path
 
 import gymnasium as gym
 
@@ -480,6 +481,11 @@ def print_summary(states, tau, angle_limit, track_limit):
     print(f"Stopped after {t:.2f} s ({steps} steps of {tau} s): {reason}.")
 
 
+# Paths in config files are relative to the repo root, so a config works
+# from any directory.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 @dataclasses.dataclass(frozen=True)
 class SimulationConfig:
     """Everything that decides what a simulation run does: the controller,
@@ -500,7 +506,9 @@ class SimulationConfig:
         choices=("none", "p", "pd", "learned"),
     )
     weights: str | None = setting(
-        None, "learned controller's weights file, saved by train.py"
+        None,
+        "learned controller's weights file, saved by train.py; in a config "
+        "file, relative to the repo root",
     )
     kp: float = setting(
         20.0, "p and pd controllers' proportional gain, in newtons per radian"
@@ -581,6 +589,24 @@ def check_controller_settings(config, given):
         raise ValueError("controller learned needs --weights")
 
 
+def locate_weights(config, from_config_file):
+    """Return config with its weights path ready to open, or raise
+    ValueError if there's no file there.
+
+    A path from a config file is taken relative to the repo root (an
+    absolute path stays as it is); one from the command line is relative
+    to the current directory, like any shell path.
+    """
+    if config.weights is None:
+        return config
+    path = Path(config.weights)
+    if from_config_file:
+        path = REPO_ROOT / path
+    if not path.is_file():
+        raise ValueError(f"weights file not found: {path}")
+    return dataclasses.replace(config, weights=str(path))
+
+
 def make_controller(config, dt):
     """Build the controller config asks for. dt is the time step."""
     if config.controller == "p":
@@ -627,8 +653,9 @@ def parse_args():
     args = parser.parse_args()
     try:
         given = given_values(SimulationConfig, args.config_file, args)
-        args.settings = make_config(SimulationConfig, given)
-        check_controller_settings(args.settings, given)
+        config = make_config(SimulationConfig, given)
+        check_controller_settings(config, given)
+        args.settings = locate_weights(config, from_config_file=args.weights is None)
     except (OSError, ValueError) as e:
         parser.error(str(e))
     return args
