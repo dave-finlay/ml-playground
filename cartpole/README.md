@@ -315,6 +315,8 @@ command-line options from it (`learning_rate` becomes
 | `seed` | none | seeds training and the test episodes; none differs each run |
 | `rate_from` | `difference` | `difference` or `velocity` (the true velocities) |
 | `normalize_inputs` | false | divide each input by its typical size (see below) |
+| `actions` | 2 | 2: push left or right; 3: also don't push (see below) |
+| `push_cost` | 0 | taken off the reward of each pushing step (needs `actions` 3) |
 | `batches` | 200 | number of updates |
 | `batch_size` | 10 | episodes per update |
 | `learning_rate` | 10 | step size α |
@@ -327,6 +329,7 @@ only needs the settings it changes:
 - `standard.json`: the defaults, written out in full
 - `true-velocities.json`: the policy sees the true velocities
 - `normalized.json`: normalized inputs, with learning rate 3
+- `three-actions.json`: normalized, three actions, push cost 0.3
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
@@ -391,6 +394,56 @@ uv run python cartpole/train.py --config cartpole/runs/slow-lr/config.json --run
 uv run python cartpole/train.py --load cartpole/runs/slow-lr --slow 4
 uv run python cartpole/cartpole.py --controller learned --weights cartpole/runs/slow-lr/weights.json
 ```
+
+### Three actions: not pushing
+
+Pushing full force left or right every 0.02 s, even when the pole is
+nearly balanced, would wear a real motor out. With `actions` 3 the
+policy can also not push. Each action k (push left, don't push, push
+right) gets a score z_k = w_k · s + b_k, and the policy picks it with
+probability softmax(z)_k. The update is REINFORCE as before, with
+(onehot(a_t) − softmax(z_t)) in place of (a_t − p_t) and (s_t, 1) in
+place of s_t, so 15 weights in all.
+
+The biases b_k matter. Without them, scaling the state up scales every
+score alike and never changes which action wins, so the choice can
+depend only on which way the state points, not how far from balance it
+is, and "don't push near balance" can't be expressed. With them, "don't
+push" can win while the push scores are small, so the trained policy
+(`ThreeActionController`) acts as a dead band: push full force when
+roughly Kx·x + Kv·ẋ + Kp·θ + Kd·θ̇ passes ± a threshold, otherwise coast.
+The printout reads the weights that way, assuming push left and push
+right mirror each other, and gives the threshold as how far the pole
+alone may lean before a push.
+
+The reward also has to make pushing cost something, or not pushing is
+never better than pushing, only sometimes no worse: `push_cost` takes
+that much off each pushing step's reward. Wear is measured in testing
+as the share of steps that push and how often the push changes
+direction, for two-action runs too (they push on every step).
+
+Results (normalized, learning rate 3, 200 batches, seeds 1 to 4; hard =
+5 m, 20 s, 1° noise and 1° offset, 3 seeds each):
+
+| push cost | test survival | pushing | direction changes | dead band | hard |
+|---|---|---|---|---|---|
+| 0 | 500 every seed | 100% | 11 to 14 per s | none | 9/12 |
+| 0.1 | 500 every seed | 90 to 100% | 12 to 15 per s | none or 0.4° | 6/12 |
+| 0.3 | 130 to 500 | 10 to 57% | 0.2 to 10 per s | 0.7° to 5.1° | 7/12 |
+| 0.5 | 130 to 500 | 9 to 27% | 0.2 to 5 per s | 4.5° to 6° | 6/12 |
+
+- With no cost it learns faster than two actions (every episode lasts
+  500 steps by about batch 40) but never coasts once trained.
+- Around 0.3 there's a real trade-off. Seed 3 lasts every test episode
+  while pushing on 15% of steps and changing direction 2.5 times a
+  second, against two actions' 100% and about 14; seed 1 learned a 5°
+  dead band and falls at 130 steps.
+- Wide dead bands survive training but fail testing: the sampled
+  policy sometimes pushes inside the band, which saves it; the
+  deterministic one doesn't.
+- Noise defeats much of the dead band: differenced rate noise crosses
+  the threshold, so in the hard conditions the same policies push on
+  40 to 75% of steps.
 
 ### Results so far
 

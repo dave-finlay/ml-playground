@@ -1,0 +1,7 @@
+{
+  "description": "Normalized, with a third action (don't push) and a push cost of 0.3 standing in for motor wear",
+  "normalize_inputs": true,
+  "learning_rate": 3.0,
+  "actions": 3,
+  "push_cost": 0.3
+}

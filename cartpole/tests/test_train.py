@@ -11,8 +11,12 @@ from cartpole import CartPole
 from config import load_config
 from train import (
     LinearPolicy,
+    ThreeActionPolicy,
     TrainConfig,
+    count_reversals,
+    dead_band,
     discounted_returns,
+    play_episode,
     policy_gradient,
     scale_to_kp,
     train,
@@ -73,15 +77,16 @@ def test_policy_gradient_by_hand():
     # 1/(2 sqrt(2))], whose mean is sqrt(2)/6. Every step saw the same s.
     s = np.array([0.0, 0.0, 0.05, 0.2])
     episodes = [episode(s, [1, 1], 0.5), episode(s, [0], 0.5)]
-    assert policy_gradient(episodes, 1.0) == pytest.approx(math.sqrt(2) / 6 * s)
+    gradient = policy_gradient(LinearPolicy(np.zeros(4)), episodes, 1.0)
+    assert gradient == pytest.approx(math.sqrt(2) / 6 * s)
 
 
 def test_policy_gradient_favours_actions_followed_by_longer_episodes():
     s = np.array([0.1, -0.3, 0.05, 0.2])
     right_lasted = episode(s, [1] * 20, 0.5)
     left_fell = episode(s, [0] * 3, 0.5)
-    gradient = policy_gradient([right_lasted, left_fell], 0.99)
     policy = LinearPolicy(np.zeros(4))
+    gradient = policy_gradient(policy, [right_lasted, left_fell], 0.99)
     before = policy.prob_right(s)
     policy.weights += 0.1 * gradient
     assert policy.prob_right(s) > before
@@ -102,6 +107,9 @@ def test_scale_to_kp():
         {"learning_rate": 0.0},
         {"gamma": 0.0},
         {"gamma": 1.5},
+        {"actions": 3, "push_cost": -0.1},
+        {"actions": 3, "push_cost": 1.0},
+        {"actions": 2, "push_cost": 0.1},  # every step pushes with two actions
     ],
 )
 def test_train_config_rejects_out_of_range(changes):
@@ -176,5 +184,100 @@ def test_normalized_training_learns(capsys):
     config = TrainConfig(seed=3, batches=50, normalize_inputs=True, learning_rate=3.0)
     _, curve, scales = run_training(config, capsys)
     assert (scales > 0).all() and (scales != 1.0).all()
+    mean_lengths = [row[2] for row in curve]
+    assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])
+
+
+@pytest.mark.parametrize("action", [0, 1, 2])
+def test_three_action_gradient_matches_numerical_derivative(action):
+    """Row k of (onehot(a) - probs) (s, 1), the gradient the update uses,
+    really is the derivative of log pi(a | s) with respect to action k's
+    weights."""
+    rng = np.random.default_rng(4)
+    weights, inputs = rng.normal(size=(3, 5)), rng.normal(size=4)
+    policy = ThreeActionPolicy(weights)
+    analytic = policy.gradient(
+        inputs[None, :], np.array([action]), policy.probs(inputs)[None, :], np.ones(1)
+    )
+
+    def log_pi(w):
+        return math.log(ThreeActionPolicy(w).probs(inputs)[action])
+
+    h = 1e-6
+    numerical = np.zeros((3, 5))
+    for k in range(3):
+        for i in range(5):
+            nudge = np.zeros((3, 5))
+            nudge[k, i] = h
+            numerical[k, i] = (log_pi(weights + nudge) - log_pi(weights - nudge)) / (
+                2 * h
+            )
+    assert analytic == pytest.approx(numerical, rel=1e-5, abs=1e-8)
+
+
+def test_three_action_probabilities():
+    assert ThreeActionPolicy(np.zeros((3, 5))).probs(np.ones(4)) == pytest.approx(
+        [1 / 3] * 3
+    )
+    probs = ThreeActionPolicy(np.random.default_rng(0).normal(size=(3, 5))).probs(
+        np.array([0.3, -1.0, 2.0, 0.5])
+    )
+    assert probs.sum() == pytest.approx(1.0) and (probs > 0).all()
+
+
+def test_three_action_normalized_weights_convert_back():
+    rng = np.random.default_rng(5)
+    scales = np.array([0.1, 0.4, 0.08, 0.6])
+    policy = ThreeActionPolicy(rng.normal(size=(3, 5)))
+    converted = ThreeActionPolicy(policy.in_input_units(scales))
+    for _ in range(50):
+        inputs = rng.normal(size=4) * scales
+        assert policy.probs(inputs / scales) == pytest.approx(converted.probs(inputs))
+
+
+def test_dead_band_reading_of_mirrored_weights():
+    left = [-1.0, -2.0, -20.0, -3.0, 0.0]
+    coast = [0.0, 0.0, 0.0, 0.0, 1.5]
+    right = [1.0, 2.0, 20.0, 3.0, 0.0]
+    gains, threshold = dead_band([left, coast, right])
+    assert gains.tolist() == [1.0, 2.0, 20.0, 3.0]
+    assert threshold == 1.5
+
+
+def test_count_reversals_ignores_coasting():
+    assert count_reversals([10, 10, 0, -10, 0, -10, 10, 0, 0]) == 2
+    assert count_reversals([0, 0, 0]) == 0
+
+
+class AlwaysDoes:
+    """A stand-in policy that always takes one of ThreeActionPolicy's
+    actions."""
+
+    def __init__(self, action):
+        self.action = action
+
+    def sample(self, inputs, rng):
+        return self.action, np.full(3, 1 / 3)
+
+    def force(self, action):
+        return ThreeActionPolicy.FORCES[action]
+
+
+@pytest.mark.parametrize("action, reward", [(1, 1.0), (2, 0.75)])
+def test_push_cost_comes_off_pushing_steps_only(action, reward):
+    cartpole = CartPole.make(angle_limit=None)
+    _, _, _, rewards = play_episode(
+        cartpole, AlwaysDoes(action), "velocity", None, seed=1, push_cost=0.25
+    )
+    cartpole.close()
+    assert set(rewards) == {reward}
+
+
+def test_three_action_training_learns(capsys):
+    config = TrainConfig(
+        seed=3, batches=40, normalize_inputs=True, learning_rate=3.0, actions=3
+    )
+    weights, curve, _ = run_training(config, capsys)
+    assert weights.shape == (3, 5)
     mean_lengths = [row[2] for row in curve]
     assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])

@@ -14,7 +14,9 @@ from cartpole import (
     RateEstimator,
     SimulationConfig,
     Smoother,
+    ThreeActionController,
     check_controller_settings,
+    controller_from_weights,
     load_weights,
     locate_weights,
     make_controller,
@@ -208,3 +210,58 @@ def test_missing_weights_file_is_a_clean_error(tmp_path, monkeypatch, from_confi
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError, match="weights file not found"):
         locate_weights(learned("runs/nope/weights.json"), from_config_file)
+
+
+# Push when 10 * angle passes 1 either way, otherwise coast: a dead band
+# of 0.1 rad. Rows: push left, don't push, push right; last column: bias.
+DEAD_BAND = [[0, 0, -10, 0, 0], [0, 0, 0, 0, 1], [0, 0, 10, 0, 0]]
+
+
+def three_action_push(weights, theta):
+    controller = ThreeActionController(weights, DT, rate_from="velocity")
+    return controller((0, 0, theta, 0))
+
+
+@pytest.mark.parametrize(
+    "theta, force", [(0.05, 0.0), (-0.05, 0.0), (0.2, 10.0), (-0.2, -10.0)]
+)
+def test_three_action_controller_has_a_dead_band(theta, force):
+    assert three_action_push(DEAD_BAND, theta) == force
+
+
+def test_three_action_controller_ignores_positive_scaling():
+    scaled = [[3 * w for w in row] for row in DEAD_BAND]
+    for theta in (-0.3, -0.08, 0.0, 0.07, 0.25):
+        assert three_action_push(scaled, theta) == three_action_push(DEAD_BAND, theta)
+
+
+def test_without_biases_the_choice_ignores_how_far_from_balance():
+    """Why the biases are needed: with none, scaling the state up never
+    changes the action, so "don't push" can't mean "nearly balanced"."""
+    rng = random.Random(1)
+    weights = [[rng.uniform(-2, 2) for _ in range(4)] + [0.0] for _ in range(3)]
+    for _ in range(200):
+        reading = tuple(rng.uniform(-1, 1) for _ in range(4))
+        further = tuple(5 * v for v in reading)
+        controller = ThreeActionController(weights, DT, rate_from="velocity")
+        same_but_further = ThreeActionController(weights, DT, rate_from="velocity")
+        assert controller(reading) == same_but_further(further)
+
+
+def test_three_action_controller_needs_three_rows_of_five():
+    with pytest.raises(ValueError):
+        ThreeActionController([[0] * 4] * 3, DT)
+
+
+def test_controller_from_weights_picks_the_kind():
+    assert isinstance(controller_from_weights([0, 0, 1, 0], DT), LinearController)
+    assert isinstance(controller_from_weights(DEAD_BAND, DT), ThreeActionController)
+
+
+def test_three_action_weights_file_round_trip(tmp_path):
+    path = tmp_path / "weights.json"
+    save_weights(path, DEAD_BAND, "velocity")
+    saved = json.loads(path.read_text())
+    assert saved["actions"] == ["push left", "don't push", "push right"]
+    assert saved["inputs"][-1].startswith("bias")
+    assert load_weights(path) == (DEAD_BAND, "velocity")

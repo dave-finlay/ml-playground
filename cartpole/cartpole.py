@@ -9,8 +9,9 @@ Uses Gymnasium's CartPole-v1 physics and renderer, with two changes:
   - p: proportional to the pole angle, up to a maximum force
   - pd: proportional to the pole angle plus its rate of change, and
     optionally terms on the cart's position and velocity
-  - learned: full force left or right, by the sign of weights learned by
-    train.py
+  - learned: weights learned by train.py, either full force left or
+    right by the sign of a weighted sum, or (with three actions) left,
+    right or no push
   The controller sees the pole angle through a sensor, which can add
   noise, a scale error and an offset error.
 - The failure angle is raised from 12 degrees to 90 degrees, so an
@@ -364,23 +365,44 @@ WEIGHT_INPUTS = [
     "pole angle rate (rad/s)",
 ]
 
+# A ThreeActionController's actions, in the order of its rows of weights,
+# and what each row's five weights multiply: the four inputs and a bias.
+THREE_ACTIONS = ["push left", "don't push", "push right"]
+THREE_ACTION_INPUTS = [*WEIGHT_INPUTS, "bias (a constant 1)"]
+
+
+def is_three_action(weights):
+    """Whether weights are a ThreeActionController's rows rather than a
+    LinearController's four numbers."""
+    return len(weights) > 0 and hasattr(weights[0], "__len__")
+
 
 def save_weights(path, weights, rate_from):
-    """Save a LinearController's weights as JSON, with what each one
-    multiplies (only for people reading the file) and how the rates they
-    were learned with were estimated."""
-    saved = {
-        "weights": [float(w) for w in weights],
-        "inputs": WEIGHT_INPUTS,
-        "rate_from": rate_from,
-    }
+    """Save a LinearController's or ThreeActionController's weights as
+    JSON, with what each one multiplies (only for people reading the file)
+    and how the rates they were learned with were estimated."""
+    if is_three_action(weights):
+        saved = {
+            "actions": THREE_ACTIONS,
+            "weights": [[float(w) for w in row] for row in weights],
+            "inputs": THREE_ACTION_INPUTS,
+            "rate_from": rate_from,
+        }
+    else:
+        saved = {
+            "weights": [float(w) for w in weights],
+            "inputs": WEIGHT_INPUTS,
+            "rate_from": rate_from,
+        }
     with open(path, "w") as f:
         json.dump(saved, f, indent=2)
         f.write("\n")
 
 
 def load_weights(path):
-    """Read weights saved by save_weights. Returns (weights, rate_from)."""
+    """Read weights saved by save_weights. Returns (weights, rate_from):
+    four numbers for a LinearController, or three rows of five for a
+    ThreeActionController."""
     with open(path) as f:
         saved = json.load(f)
     return saved["weights"], saved["rate_from"]
@@ -414,6 +436,52 @@ class LinearController:
         inputs = self._rates.update(reading)
         total = sum(w * v for w, v in zip(self.weights, inputs, strict=True))
         return self.max_force if total >= 0 else -self.max_force
+
+
+class ThreeActionController:
+    """Controller with learned weights and three actions: push max_force
+    newtons left, don't push, or push max_force right. Each action scores
+
+        weights[k] · (cart position, its rate, pole angle, its rate, 1)
+
+    and the highest score wins (a tie goes to not pushing). The last
+    weight of each row is the action's bias, a constant that lets "don't
+    push" win near balance: without biases, scaling the state up or down
+    would scale every score alike and never change the winner, so the
+    choice couldn't depend on how far from balance it is. With them, the
+    controller coasts while the push scores are small and pushes full
+    force once they outgrow the bias: a dead band.
+
+    It's what train.py's three-action policy does once trained, taking the
+    likeliest action instead of sampling. dt and rate_from say how the
+    rates are estimated (see RateEstimator); use the rate_from the weights
+    were learned with. It remembers previous readings, so use a new one
+    for each episode.
+    """
+
+    def __init__(self, weights, dt, max_force=10.0, rate_from="difference"):
+        if len(weights) != 3 or any(len(row) != 5 for row in weights):
+            raise ValueError("need 3 rows of 5 weights")
+        self.weights = [list(row) for row in weights]
+        self.max_force = max_force
+        self._rates = RateEstimator(dt, rate_from)
+
+    def __call__(self, reading):
+        inputs = (*self._rates.update(reading), 1.0)
+        left, coast, right = (
+            sum(w * v for w, v in zip(row, inputs, strict=True)) for row in self.weights
+        )
+        if coast >= max(left, right):
+            return 0.0
+        return self.max_force if right >= left else -self.max_force
+
+
+def controller_from_weights(weights, dt, max_force=10.0, rate_from="difference"):
+    """Build the controller weights are for: a ThreeActionController for
+    three rows of weights, otherwise a LinearController."""
+    if is_three_action(weights):
+        return ThreeActionController(weights, dt, max_force, rate_from)
+    return LinearController(weights, dt, max_force, rate_from)
 
 
 def run_simulation(
@@ -516,8 +584,9 @@ class SimulationConfig:
     controller: str = setting(
         "none",
         "none: never push; p: push proportional to the pole angle; pd: "
-        "proportional to the angle plus its rate of change; learned: full "
-        "force left or right, by weights from --weights",
+        "proportional to the angle plus its rate of change; learned: weights "
+        "from --weights, pushing full force left or right (or, with three "
+        "actions, not at all)",
         choices=("none", "p", "pd", "learned"),
     )
     weights: str | None = setting(
@@ -639,7 +708,7 @@ def make_controller(config, dt):
         )
     if config.controller == "learned":
         weights, rate_from = load_weights(config.weights)
-        return LinearController(
+        return controller_from_weights(
             weights, dt=dt, max_force=config.max_force, rate_from=rate_from
         )
     return no_control

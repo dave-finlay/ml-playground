@@ -33,6 +33,19 @@ cartpole.py: push right when w · s >= 0 (cartpole.py's LinearController).
 So the weights play the roles of the PD controller's gains Kx, Kv, Kp and
 Kd.
 
+With actions 3, the policy can also not push. Each action k (push left,
+don't push, push right) scores z_k = w_k · s + b_k, and the policy picks
+it with probability softmax(z)_k. The bias b_k is what lets "don't push"
+win near balance: without it, scaling s scales every score alike, so the
+choice could depend only on the direction of the state, not on how far
+from balance it is. The update has the same form, with
+(onehot(a_t) - softmax(z_t)) in place of (a_t - p_t), and (s_t, 1) for
+s_t. Once trained it acts as a dead band (cartpole.py's
+ThreeActionController): coast while the combined signal is small, push
+full force once it's past a threshold. push_cost takes that much off the
+reward of every step that pushes, standing in for motor wear; without
+it, not pushing is never better than pushing, only sometimes no worse.
+
 Settings come from built-in defaults, overridden by a JSON config file
 (--config), overridden by command-line options; see config.py. Each
 training run is saved in its own directory under cartpole/runs/:
@@ -58,6 +71,7 @@ import argparse
 import csv
 import dataclasses
 import datetime
+import itertools
 import json
 import math
 import os
@@ -69,8 +83,8 @@ import numpy as np
 
 from cartpole import (
     CartPole,
-    LinearController,
     RateEstimator,
+    controller_from_weights,
     load_weights,
     print_summary,
     run_simulation,
@@ -121,6 +135,16 @@ class TrainConfig:
         "divide each input by its typical size, measured in coin-toss episodes "
         "before training, so all four weights learn at comparable rates",
     )
+    actions: int = setting(
+        2,
+        "2: push left or right every step; 3: push left, don't push or push right",
+        choices=(2, 3),
+    )
+    push_cost: float = setting(
+        0.0,
+        "taken off the reward (1 per step) for every step that pushes, for "
+        "motor wear; needs actions 3",
+    )
     batches: int = setting(200, "number of weight updates")
     batch_size: int = setting(10, "episodes played per update")
     learning_rate: float = setting(10.0, "step size for each update")
@@ -137,6 +161,12 @@ class TrainConfig:
             raise ValueError("learning_rate should be more than 0")
         if not 0 < self.gamma <= 1:
             raise ValueError("gamma should be more than 0 and at most 1")
+        if not 0 <= self.push_cost < 1:
+            raise ValueError("push_cost should be at least 0 and less than 1")
+        if self.push_cost and self.actions == 2:
+            raise ValueError(
+                "push_cost needs actions 3: with two actions every step pushes"
+            )
 
 
 def sigmoid(z):
@@ -178,18 +208,96 @@ class LinearPolicy:
         action = 1 if rng.random() < p else 0
         return action, p
 
+    def force(self, action):
+        """The push, in newtons, for an action."""
+        return FORCE if action == 1 else -FORCE
 
-def play_episode(cartpole, policy, rate_from, rng, seed=None, scales=None):
+    def gradient(self, inputs, actions, probs, advantages):
+        """Mean over the steps of A_t (a_t - p_t) s_t: the uphill direction
+        for the weights. (a_t - p_t) s_t is the gradient of
+        log pi(a_t | s_t)."""
+        return ((advantages * (actions - probs))[:, None] * inputs).mean(axis=0)
+
+    def in_input_units(self, scales):
+        """The weights for inputs that haven't been divided by scales."""
+        return self.weights / scales
+
+
+class ThreeActionPolicy:
+    """Pushes left, doesn't push or pushes right (actions 0, 1, 2), with
+    probabilities softmax(z), where z_k = weights[k] · (inputs, 1).
+
+    weights has a row of five per action: one for each input, then a bias.
+    For the trained policy without sampling, use cartpole.py's
+    ThreeActionController with the same weights.
+    """
+
+    FORCES = (-FORCE, 0.0, FORCE)
+
+    def __init__(self, weights):
+        self.weights = np.array(weights, dtype=float)
+
+    def probs(self, inputs):
+        """Probabilities of the three actions given inputs."""
+        scores = self.weights[:, :4] @ inputs + self.weights[:, 4]
+        exp = np.exp(scores - scores.max())  # the same softmax, without overflow
+        return exp / exp.sum()
+
+    def sample(self, inputs, rng):
+        """Choose an action at random from the policy. Returns (action,
+        probs): the action, and the probabilities it was drawn with."""
+        probs = self.probs(inputs)
+        action = int(np.searchsorted(np.cumsum(probs), rng.random(), side="right"))
+        return min(action, 2), probs
+
+    def force(self, action):
+        """The push, in newtons, for an action."""
+        return self.FORCES[action]
+
+    def gradient(self, inputs, actions, probs, advantages):
+        """Mean over the steps of A_t (onehot(a_t) - probs_t) (s_t, 1): the
+        uphill direction for each action's weights. Row k of
+        (onehot(a_t) - probs_t) (s_t, 1) is the gradient of log pi(a_t | s_t)
+        with respect to action k's weights."""
+        features = np.hstack([inputs, np.ones((len(inputs), 1))])
+        taken = np.eye(3)[actions]
+        return np.einsum("t,tk,ti->ki", advantages, taken - probs, features) / len(
+            inputs
+        )
+
+    def in_input_units(self, scales):
+        """The weights for inputs that haven't been divided by scales (the
+        biases are unchanged)."""
+        weights = self.weights.copy()
+        weights[:, :4] /= scales
+        return weights
+
+
+def new_policy(actions):
+    """A policy with all-zero weights, which picks every action equally
+    often."""
+    return (
+        LinearPolicy(np.zeros(4))
+        if actions == 2
+        else ThreeActionPolicy(np.zeros((3, 5)))
+    )
+
+
+def play_episode(
+    cartpole, policy, rate_from, rng, seed=None, scales=None, push_cost=0.0
+):
     """Play one episode, sampling actions from policy.
 
     The policy's inputs come from the state through a RateEstimator, so
     with rate_from "difference" it sees the rates the way cartpole.py's
     controllers estimate them. If scales is given, each input is divided
-    by its scale.
+    by its scale. push_cost is taken off the reward of each step that
+    pushes.
 
     Returns (inputs, actions, probs, rewards), one entry per step: what
-    the policy saw, the action (1 right, 0 left), the probability of
-    pushing right, and the reward that followed.
+    the policy saw, the action, what the policy's sample() returned with
+    it (the probability of pushing right, or of each action), and the
+    reward that followed.
     """
     rates = RateEstimator(cartpole.tau, rate_from)
     inputs, actions, probs, rewards = [], [], [], []
@@ -203,35 +311,35 @@ def play_episode(cartpole, policy, rate_from, rng, seed=None, scales=None):
         inputs.append(seen)
         actions.append(action)
         probs.append(p)
-        state, reward, terminated, truncated = cartpole.step(
-            FORCE if action == 1 else -FORCE
-        )
-        rewards.append(reward)
+        force = policy.force(action)
+        state, reward, terminated, truncated = cartpole.step(force)
+        rewards.append(reward - push_cost if force != 0 else reward)
     return np.array(inputs), np.array(actions), np.array(probs), rewards
 
 
-def policy_gradient(episodes, gamma):
-    """Estimate the uphill direction for the weights from a batch of
-    episodes: the mean over every step of A_t (a_t - p_t) s_t, where s_t
-    is what the policy saw.
+def policy_gradient(policy, episodes, gamma):
+    """Estimate the uphill direction for policy's weights from a batch of
+    episodes: the mean over every step of A_t times the gradient of
+    log pi(a_t | s_t), the direction that makes the action taken more
+    likely in that state (see the policy's gradient()).
 
     A_t is the step's return standardized over the whole batch, so steps
     followed by better-than-average returns count for, and the rest
-    against. (a_t - p_t) s_t is the gradient of log pi(a_t | s_t): the
-    direction that makes the action taken more likely in that state.
+    against.
     """
     inputs = np.concatenate([s for s, _, _, _ in episodes])
     actions = np.concatenate([a for _, a, _, _ in episodes])
     probs = np.concatenate([p for _, _, p, _ in episodes])
     returns = np.concatenate([discounted_returns(r, gamma) for _, _, _, r in episodes])
     advantages = (returns - returns.mean()) / (returns.std() + 1e-8)
-    return ((advantages * (actions - probs))[:, None] * inputs).mean(axis=0)
+    return policy.gradient(inputs, actions, probs, advantages)
 
 
-def measure_input_scales(cartpole, rate_from, rng, episodes, seed=None):
+def measure_input_scales(cartpole, actions, rate_from, rng, episodes, seed=None):
     """Return the standard deviation of each of the policy's inputs over
-    episodes of coin-toss pushing, the way training starts."""
-    coin_toss = LinearPolicy(np.zeros(4))
+    episodes of picking every action equally often, the way training
+    starts."""
+    coin_toss = new_policy(actions)
     inputs = np.concatenate(
         [
             play_episode(cartpole, coin_toss, rate_from, rng, seed if i == 0 else None)[
@@ -245,30 +353,36 @@ def measure_input_scales(cartpole, rate_from, rng, episodes, seed=None):
 
 
 def train(cartpole, config, rng, report_every=10):
-    """Train a LinearPolicy, starting from all-zero weights (a coin toss
-    every step), and return (weights, curve, scales).
+    """Train a policy (LinearPolicy, or ThreeActionPolicy with actions 3),
+    starting from all-zero weights (every action equally likely), and
+    return (weights, curve, scales).
 
     weights are the learned weights, in the inputs' own units even when
     training normalized them. scales are what the inputs were divided by
     (all 1 without normalize_inputs).
 
     curve has one row per batch: (batch, episodes so far, mean, shortest
-    and longest episode in the batch, then the four weights after the
-    batch's update, in the inputs' own units). Every report_every batches,
-    the row is also printed.
+    and longest episode in the batch, then with actions 3 the fraction of
+    steps that pushed, then all the weights after the batch's update, in
+    the inputs' own units). Every report_every batches, the row is also
+    printed.
     """
     if config.normalize_inputs:
         scales = measure_input_scales(
-            cartpole, config.rate_from, rng, SCALE_EPISODES, config.seed
+            cartpole, config.actions, config.rate_from, rng, SCALE_EPISODES, config.seed
         )
         print("Input scales (x, x rate, angle, angle rate):", np.round(scales, 3))
     else:
         scales = np.ones(4)
-    policy = LinearPolicy(np.zeros(4))
+    policy = new_policy(config.actions)
     curve = []
+    if config.actions == 2:
+        shown_heading = "weights (x, x rate, angle, angle rate)"
+    else:
+        shown_heading = "pushing  as a dead band: Kx, Kv, Kd at Kp=20; half-width"
     print(
         f"{'batch':>5}  {'episodes':>8}  {'mean len':>8}  {'min':>4}  "
-        f"{'max':>4}  weights (x, x rate, angle, angle rate)"
+        f"{'max':>4}  {shown_heading}"
     )
     for batch in range(1, config.batches + 1):
         episodes = []
@@ -276,11 +390,19 @@ def train(cartpole, config, rng, report_every=10):
             episode_seed = config.seed if batch == 1 and i == 0 else None
             episodes.append(
                 play_episode(
-                    cartpole, policy, config.rate_from, rng, episode_seed, scales
+                    cartpole,
+                    policy,
+                    config.rate_from,
+                    rng,
+                    episode_seed,
+                    scales,
+                    config.push_cost,
                 )
             )
-        policy.weights += config.learning_rate * policy_gradient(episodes, config.gamma)
-        weights = policy.weights / scales
+        policy.weights += config.learning_rate * policy_gradient(
+            policy, episodes, config.gamma
+        )
+        weights = policy.in_input_units(scales)
         lengths = [len(r) for _, _, _, r in episodes]
         row = (
             batch,
@@ -288,24 +410,57 @@ def train(cartpole, config, rng, report_every=10):
             float(np.mean(lengths)),
             min(lengths),
             max(lengths),
-            *weights.tolist(),
         )
+        if config.actions == 3:
+            actions = np.concatenate([a for _, a, _, _ in episodes])
+            push_fraction = float(np.mean(actions != 1))
+            row += (push_fraction,)
+        row += tuple(weights.ravel().tolist())
         curve.append(row)
         if batch % report_every == 0 or batch == 1 or batch == config.batches:
-            shown = " ".join(f"{w:7.3f}" for w in weights)
+            if config.actions == 2:
+                shown = " ".join(f"{w:7.3f}" for w in weights)
+            else:
+                shown = f"{100 * push_fraction:6.1f}%  {describe_dead_band(weights)}"
             print(
                 f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  {shown}"
             )
     return weights, curve, scales
 
 
+class ForceRecorder:
+    """Wraps a controller, recording every force it returns."""
+
+    def __init__(self, controller):
+        self.controller = controller
+        self.forces = []
+
+    def __call__(self, reading):
+        force = self.controller(reading)
+        self.forces.append(force)
+        return force
+
+
+def count_reversals(forces):
+    """How many times the push changes direction, ignoring steps without
+    a push in between: wear on the motor, along with time spent pushing."""
+    pushes = [f for f in forces if f != 0]
+    return sum(1 for a, b in itertools.pairwise(pushes) if (a > 0) != (b > 0))
+
+
 def evaluate(cartpole, weights, rate_from, episodes, seed=None):
-    """Play episodes with the weights as a controller (no sampling) and
-    return their lengths in steps. seed, if given, sets the first starting
-    state, which makes the whole set repeatable."""
-    lengths = []
+    """Play episodes with the weights as a controller (no sampling).
+
+    Returns (lengths, push_fraction, reversals_per_second): each episode's
+    length in steps, the fraction of all steps that pushed, and how often
+    the push changed direction. seed, if given, sets the first starting
+    state, which makes the whole set repeatable.
+    """
+    lengths, forces, reversals = [], [], 0
     for i in range(episodes):
-        controller = LinearController(weights, cartpole.tau, FORCE, rate_from)
+        controller = ForceRecorder(
+            controller_from_weights(weights, cartpole.tau, FORCE, rate_from)
+        )
         states, _ = run_simulation(
             cartpole,
             controller,
@@ -314,7 +469,10 @@ def evaluate(cartpole, weights, rate_from, episodes, seed=None):
             end_pause=0,
         )
         lengths.append(len(states) - 1)
-    return lengths
+        forces += controller.forces
+        reversals += count_reversals(controller.forces)
+    push_fraction = float(np.mean([f != 0 for f in forces]))
+    return lengths, push_fraction, reversals / (sum(lengths) * cartpole.tau)
 
 
 def scale_to_kp(weights):
@@ -328,8 +486,38 @@ def scale_to_kp(weights):
     return weights * PD_GAINS[2] / weights[2]
 
 
+def dead_band(weights):
+    """Read three-action weights as a dead band, assuming push left and
+    push right mirror each other: push right when gains · inputs >
+    threshold, left when it's below -threshold, and otherwise coast.
+    Returns (gains, threshold), unscaled."""
+    left, coast, right = np.asarray(weights)
+    gains = (right[:4] - left[:4]) / 2
+    threshold = coast[4] - (right[4] + left[4]) / 2
+    return gains, threshold
+
+
+def describe_dead_band(weights):
+    """One line: the dead band's gains scaled to Kp = 20, and its
+    half-width as a pole angle (how far the pole alone may lean before a
+    push)."""
+    gains, threshold = dead_band(weights)
+    if gains[2] <= 0:
+        return "(not yet a dead band: the angle gain isn't positive)"
+    scaled = scale_to_kp(gains)
+    width = (
+        f"{math.degrees(threshold / gains[2]):6.2f} deg"
+        if threshold > 0
+        else "none (coasting never wins)"
+    )
+    return f"{scaled[0]:6.2f} {scaled[1]:6.2f} {scaled[3]:6.2f}  {width}"
+
+
 def print_comparison(weights):
     """Print the weights next to the hand-tuned gentle PD gains."""
+    if np.ndim(weights) == 2:
+        print_dead_band_comparison(weights)
+        return
     print(
         "Learned weights, scaled so the angle weight matches Kp, next to the\n"
         "hand-tuned gentle gains from cartpole.py (--controller pd --kp 20\n"
@@ -339,6 +527,35 @@ def print_comparison(weights):
     rows = zip(GAIN_NAMES, weights, scale_to_kp(weights), PD_GAINS, strict=True)
     for name, w, s, g in rows:
         print(f"  {name:20}  {w:8.3f}  {s:8.2f}  {g:9.2f}")
+
+
+def print_dead_band_comparison(weights):
+    """Print three-action weights read as a dead band, next to the
+    hand-tuned gentle PD gains."""
+    gains, threshold = dead_band(weights)
+    print("Learned weights (rows: push left, don't push, push right; last: bias):")
+    for name, row in zip(("left", "coast", "right"), weights, strict=True):
+        print(f"  {name:6}" + "".join(f"{w:9.3f}" for w in row))
+    if gains[2] <= 0:
+        print("No dead band: the angle gain isn't positive.")
+        return
+    print(
+        "Read as a dead band (push when gains · inputs passes ± threshold), "
+        "scaled\nso the angle gain matches Kp, next to the hand-tuned gentle "
+        "gains:"
+    )
+    print(f"  {'':20}  {'scaled':>8}  {'gentle PD':>9}")
+    rows = zip(GAIN_NAMES, scale_to_kp(gains), PD_GAINS, strict=True)
+    for name, s, g in rows:
+        print(f"  {name:20}  {s:8.2f}  {g:9.2f}")
+    if threshold > 0:
+        print(
+            f"  {'threshold':20}  {threshold * PD_GAINS[2] / gains[2]:8.3f}  "
+            f"(the pole alone may lean {math.degrees(threshold / gains[2]):.2f} "
+            "deg before a push)"
+        )
+    else:
+        print("  No dead band: coasting never wins, so it always pushes.")
 
 
 def git_version():
@@ -370,37 +587,43 @@ def save_json(path, data):
         f.write("\n")
 
 
-def write_curve(path, curve):
+def curve_columns(actions):
+    """Column names for train()'s learning curve."""
+    columns = ["batch", "episodes", "mean_length", "min_length", "max_length"]
+    inputs = ["x", "x_rate", "angle", "angle_rate"]
+    if actions == 2:
+        return columns + [f"w_{name}" for name in inputs]
+    return (
+        columns
+        + ["push_fraction"]
+        + [
+            f"w_{action}_{name}"
+            for action in ("left", "coast", "right")
+            for name in [*inputs, "bias"]
+        ]
+    )
+
+
+def write_curve(path, curve, actions):
     """Write the learning curve from train() as CSV, one row per batch."""
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "batch",
-                "episodes",
-                "mean_length",
-                "min_length",
-                "max_length",
-                "w_x",
-                "w_x_rate",
-                "w_angle",
-                "w_angle_rate",
-            ]
-        )
+        writer.writerow(curve_columns(actions))
         writer.writerows(curve)
 
 
-def save_run(run_dir, config, weights, curve, lengths, max_steps, info):
+def save_run(run_dir, config, weights, curve, test, max_steps, info):
     """Save everything about a training run in a new directory run_dir.
 
-    info holds what else to record in results.json: when the run started,
-    how long training took, the git version of the code and the input
-    scales.
+    test is what evaluate() returned. info holds what else to record in
+    results.json: when the run started, how long training took, the git
+    version of the code and the input scales.
     """
+    lengths, push_fraction, reversals_per_second = test
     run_dir.mkdir(parents=True)
     save_config(run_dir / "config.json", config)
     save_weights(run_dir / "weights.json", weights, config.rate_from)
-    write_curve(run_dir / "curve.csv", curve)
+    write_curve(run_dir / "curve.csv", curve, config.actions)
     _, _, mean, shortest, longest, *_ = curve[-1]
     results = {
         **info,
@@ -412,8 +635,18 @@ def save_run(run_dir, config, weights, curve, lengths, max_steps, info):
             "max": max(lengths),
             "limit": max_steps,
         },
-        "weights_scaled_to_kp": scale_to_kp(weights).tolist(),
+        "test_push_fraction": push_fraction,
+        "test_reversals_per_second": reversals_per_second,
     }
+    if config.actions == 2:
+        results["weights_scaled_to_kp"] = scale_to_kp(weights).tolist()
+    else:
+        gains, threshold = dead_band(weights)
+        results["dead_band"] = {
+            "gains_scaled_to_kp": scale_to_kp(gains).tolist(),
+            "threshold_scaled_to_kp": float(threshold * PD_GAINS[2] / gains[2]),
+            "half_width_degrees": math.degrees(threshold / gains[2]),
+        }
     save_json(run_dir / "results.json", results)
 
 
@@ -511,7 +744,8 @@ def main():
     print()
     print_comparison(weights)
     cartpole = CartPole.make(angle_limit=None)
-    lengths = evaluate(cartpole, weights, rate_from, config.eval_episodes, config.seed)
+    test = evaluate(cartpole, weights, rate_from, config.eval_episodes, config.seed)
+    lengths, push_fraction, reversals_per_second = test
     cartpole.close()
     print()
     print(
@@ -519,18 +753,20 @@ def main():
         f"{np.mean(lengths):.1f} steps, shortest {min(lengths)}, longest "
         f"{max(lengths)} (limit {cartpole.max_steps})"
     )
+    print(
+        f"Pushing on {100 * push_fraction:.1f}% of steps, changing direction "
+        f"{reversals_per_second:.1f} times a second"
+    )
 
     if args.run_dir:
-        save_run(
-            args.run_dir, config, weights, curve, lengths, cartpole.max_steps, info
-        )
+        save_run(args.run_dir, config, weights, curve, test, cartpole.max_steps, info)
         print(f"Saved the run to {os.path.relpath(args.run_dir)}")
     elif args.no_save:
         print("Not saved (--no-save).")
 
     if not args.no_window:
         cartpole = CartPole.make(render_mode="human", slow=args.slow, angle_limit=None)
-        controller = LinearController(weights, cartpole.tau, FORCE, rate_from)
+        controller = controller_from_weights(weights, cartpole.tau, FORCE, rate_from)
         states, _ = run_simulation(cartpole, controller)
         cartpole.close()
         print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
