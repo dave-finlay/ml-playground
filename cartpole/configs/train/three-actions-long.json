@@ -1,0 +1,8 @@
+{
+  "description": "Three actions with push cost 0.3, trained for 1000 batches (keeping the best checkpoint, as by default)",
+  "normalize_inputs": true,
+  "learning_rate": 3.0,
+  "actions": 3,
+  "push_cost": 0.3,
+  "batches": 1000
+}

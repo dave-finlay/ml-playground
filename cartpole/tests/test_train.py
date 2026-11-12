@@ -18,6 +18,7 @@ from train import (
     discounted_returns,
     play_episode,
     policy_gradient,
+    relies_on_randomness,
     scale_to_kp,
     train,
 )
@@ -110,6 +111,8 @@ def test_scale_to_kp():
         {"actions": 3, "push_cost": -0.1},
         {"actions": 3, "push_cost": 1.0},
         {"actions": 2, "push_cost": 0.1},  # every step pushes with two actions
+        {"checkpoint_every": -1},
+        {"checkpoint_episodes": 0},
     ],
 )
 def test_train_config_rejects_out_of_range(changes):
@@ -137,12 +140,17 @@ def test_standard_config_matches_the_defaults():
     assert dataclasses.replace(standard, description="") == TrainConfig()
 
 
-def run_training(config, capsys):
+def training_result(config, capsys):
     cartpole = CartPole.make(angle_limit=None)
-    weights, curve, scales = train(cartpole, config, np.random.default_rng(config.seed))
+    result = train(cartpole, config, np.random.default_rng(config.seed))
     cartpole.close()
     capsys.readouterr()  # discard the printed learning curve
-    return weights, curve, scales
+    return result
+
+
+def run_training(config, capsys):
+    result = training_result(config, capsys)
+    return result.weights, result.curve, result.scales
 
 
 def test_training_with_a_seed_is_repeatable(capsys):
@@ -281,3 +289,49 @@ def test_three_action_training_learns(capsys):
     assert weights.shape == (3, 5)
     mean_lengths = [row[2] for row in curve]
     assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])
+
+
+CHECKPOINTED = TrainConfig(
+    seed=3,
+    batches=30,
+    normalize_inputs=True,
+    learning_rate=3.0,
+    actions=3,
+    push_cost=0.3,
+    checkpoint_every=10,
+    checkpoint_episodes=3,
+)
+
+
+def curve_weights(result, batch):
+    """The weights after batch, from the learning curve (three actions)."""
+    return np.array(result.curve[batch - 1][6:]).reshape(3, 5)
+
+
+def test_checkpoints_keep_the_best_weights(capsys):
+    result = training_result(CHECKPOINTED, capsys)
+    assert [c[0] for c in result.checkpoints] == [10, 20, 30]
+    returns = {c[0]: c[4] for c in result.checkpoints}
+    assert returns[result.best_batch] == max(returns.values())
+    assert result.weights == pytest.approx(curve_weights(result, result.best_batch))
+    assert result.final_weights == pytest.approx(curve_weights(result, 30))
+
+
+def test_checkpoints_dont_change_training(capsys):
+    unchecked = dataclasses.replace(CHECKPOINTED, checkpoint_every=0)
+    assert training_result(CHECKPOINTED, capsys).curve == (
+        training_result(unchecked, capsys).curve
+    )
+
+
+def test_without_checkpoints_the_final_weights_are_kept(capsys):
+    result = training_result(TrainConfig(seed=1, batches=3, checkpoint_every=0), capsys)
+    assert result.checkpoints == []
+    assert result.weights.tolist() == result.final_weights.tolist()
+    assert result.best_batch == 3
+
+
+def test_relies_on_randomness_needs_a_clear_gap():
+    assert relies_on_randomness(498, 266, 500)
+    assert not relies_on_randomness(480, 500, 500)
+    assert not relies_on_randomness(500, 460, 500)  # within a tenth of 500

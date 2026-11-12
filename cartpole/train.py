@@ -101,6 +101,10 @@ from config import (
 
 FORCE = 10.0  # standard CartPole's push, in newtons
 SCALE_EPISODES = 20  # coin-toss episodes for measuring input scales
+# Added to the seed for checkpoint tests, so they start from different
+# positions than the final test: picking the best checkpoint on the same
+# episodes it's then tested on would flatter it.
+CHECKPOINT_SEED_OFFSET = 1_000_003
 RUNS_DIR = Path(__file__).parent / "runs"
 
 # The hand-tuned "gentle" gains from cartpole.py's PD controller, for
@@ -152,9 +156,23 @@ class TrainConfig:
     eval_episodes: int = setting(
         20, "episodes to test the trained policy on, without sampling"
     )
+    checkpoint_every: int = setting(
+        25,
+        "every this many batches (and after the last), test the policy "
+        "without sampling, keep the best weights so far and say whether "
+        "sampling does better; 0 turns checkpoints off and keeps the final "
+        "weights",
+    )
+    checkpoint_episodes: int = setting(
+        30,
+        "test episodes at each checkpoint, always from the same starting "
+        "positions, which differ from the final test's",
+    )
 
     def __post_init__(self):
-        for name in ("batches", "batch_size", "eval_episodes"):
+        if self.checkpoint_every < 0:
+            raise ValueError("checkpoint_every should be at least 0")
+        for name in ("batches", "batch_size", "eval_episodes", "checkpoint_episodes"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} should be at least 1")
         if self.learning_rate <= 0:
@@ -352,82 +370,6 @@ def measure_input_scales(cartpole, actions, rate_from, rng, episodes, seed=None)
     return np.where(scales > 0, scales, 1.0)
 
 
-def train(cartpole, config, rng, report_every=10):
-    """Train a policy (LinearPolicy, or ThreeActionPolicy with actions 3),
-    starting from all-zero weights (every action equally likely), and
-    return (weights, curve, scales).
-
-    weights are the learned weights, in the inputs' own units even when
-    training normalized them. scales are what the inputs were divided by
-    (all 1 without normalize_inputs).
-
-    curve has one row per batch: (batch, episodes so far, mean, shortest
-    and longest episode in the batch, then with actions 3 the fraction of
-    steps that pushed, then all the weights after the batch's update, in
-    the inputs' own units). Every report_every batches, the row is also
-    printed.
-    """
-    if config.normalize_inputs:
-        scales = measure_input_scales(
-            cartpole, config.actions, config.rate_from, rng, SCALE_EPISODES, config.seed
-        )
-        print("Input scales (x, x rate, angle, angle rate):", np.round(scales, 3))
-    else:
-        scales = np.ones(4)
-    policy = new_policy(config.actions)
-    curve = []
-    if config.actions == 2:
-        shown_heading = "weights (x, x rate, angle, angle rate)"
-    else:
-        shown_heading = "pushing  as a dead band: Kx, Kv, Kd at Kp=20; half-width"
-    print(
-        f"{'batch':>5}  {'episodes':>8}  {'mean len':>8}  {'min':>4}  "
-        f"{'max':>4}  {shown_heading}"
-    )
-    for batch in range(1, config.batches + 1):
-        episodes = []
-        for i in range(config.batch_size):
-            episode_seed = config.seed if batch == 1 and i == 0 else None
-            episodes.append(
-                play_episode(
-                    cartpole,
-                    policy,
-                    config.rate_from,
-                    rng,
-                    episode_seed,
-                    scales,
-                    config.push_cost,
-                )
-            )
-        policy.weights += config.learning_rate * policy_gradient(
-            policy, episodes, config.gamma
-        )
-        weights = policy.in_input_units(scales)
-        lengths = [len(r) for _, _, _, r in episodes]
-        row = (
-            batch,
-            batch * config.batch_size,
-            float(np.mean(lengths)),
-            min(lengths),
-            max(lengths),
-        )
-        if config.actions == 3:
-            actions = np.concatenate([a for _, a, _, _ in episodes])
-            push_fraction = float(np.mean(actions != 1))
-            row += (push_fraction,)
-        row += tuple(weights.ravel().tolist())
-        curve.append(row)
-        if batch % report_every == 0 or batch == 1 or batch == config.batches:
-            if config.actions == 2:
-                shown = " ".join(f"{w:7.3f}" for w in weights)
-            else:
-                shown = f"{100 * push_fraction:6.1f}%  {describe_dead_band(weights)}"
-            print(
-                f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  {shown}"
-            )
-    return weights, curve, scales
-
-
 class ForceRecorder:
     """Wraps a controller, recording every force it returns."""
 
@@ -513,6 +455,181 @@ def describe_dead_band(weights):
     return f"{scaled[0]:6.2f} {scaled[1]:6.2f} {scaled[3]:6.2f}  {width}"
 
 
+CHECKPOINT_COLUMNS = [
+    "batch",
+    "sampled_mean_length",
+    "test_mean_length",
+    "test_min_length",
+    "test_mean_return",
+    "test_push_fraction",
+    "test_reversals_per_second",
+    "best_so_far",
+]
+
+
+def relies_on_randomness(sampled_mean_length, test_mean_length, max_steps):
+    """Whether the policy did clearly better sampling its actions (in the
+    training batches) than taking the likeliest one (in a checkpoint test):
+    by more than a tenth of the longest episode. Then its randomness is
+    doing useful work, which the deterministic controller loses."""
+    return sampled_mean_length - test_mean_length > max_steps / 10
+
+
+@dataclasses.dataclass
+class TrainingResult:
+    """What train() returns.
+
+    weights are the ones to use: the best checkpoint's, or the final
+    weights without checkpoints. Both are in the inputs' own units even
+    when training normalized them. scales are what the inputs were divided
+    by (all 1 without normalize_inputs). curve has a row per batch and
+    checkpoints a row per checkpoint (see CHECKPOINT_COLUMNS); best_batch
+    is the batch the kept weights come from.
+    """
+
+    weights: np.ndarray
+    final_weights: np.ndarray
+    scales: np.ndarray
+    curve: list
+    checkpoints: list
+    best_batch: int
+
+
+def train(cartpole, config, rng, report_every=10):
+    """Train a policy (LinearPolicy, or ThreeActionPolicy with actions 3),
+    starting from all-zero weights (every action equally likely), and
+    return a TrainingResult.
+
+    curve has one row per batch: (batch, episodes so far, mean, shortest
+    and longest episode in the batch, then with actions 3 the fraction of
+    steps that pushed, then all the weights after the batch's update, in
+    the inputs' own units). Every report_every batches, the row is also
+    printed.
+
+    With checkpoint_every, every that many batches and after the last, the
+    policy is tested without sampling, scored by the reward training uses
+    (steps survived, less push_cost on pushing steps), and the best
+    weights so far are kept. Ties go to the later checkpoint, which has
+    trained longer.
+    """
+    if config.normalize_inputs:
+        scales = measure_input_scales(
+            cartpole, config.actions, config.rate_from, rng, SCALE_EPISODES, config.seed
+        )
+        print("Input scales (x, x rate, angle, angle rate):", np.round(scales, 3))
+    else:
+        scales = np.ones(4)
+    policy = new_policy(config.actions)
+    curve, checkpoints = [], []
+    best_weights, best_return, best_batch = None, -math.inf, config.batches
+    checkpoint_cartpole = CartPole.make(angle_limit=None)
+    checkpoint_seed = (config.seed or 0) + CHECKPOINT_SEED_OFFSET
+    if config.actions == 2:
+        shown_heading = "weights (x, x rate, angle, angle rate)"
+    else:
+        shown_heading = "pushing  as a dead band: Kx, Kv, Kd at Kp=20; half-width"
+    print(
+        f"{'batch':>5}  {'episodes':>8}  {'mean len':>8}  {'min':>4}  "
+        f"{'max':>4}  {shown_heading}"
+    )
+    for batch in range(1, config.batches + 1):
+        episodes = []
+        for i in range(config.batch_size):
+            episode_seed = config.seed if batch == 1 and i == 0 else None
+            episodes.append(
+                play_episode(
+                    cartpole,
+                    policy,
+                    config.rate_from,
+                    rng,
+                    episode_seed,
+                    scales,
+                    config.push_cost,
+                )
+            )
+        policy.weights += config.learning_rate * policy_gradient(
+            policy, episodes, config.gamma
+        )
+        weights = policy.in_input_units(scales)
+        lengths = [len(r) for _, _, _, r in episodes]
+        row = (
+            batch,
+            batch * config.batch_size,
+            float(np.mean(lengths)),
+            min(lengths),
+            max(lengths),
+        )
+        if config.actions == 3:
+            actions = np.concatenate([a for _, a, _, _ in episodes])
+            push_fraction = float(np.mean(actions != 1))
+            row += (push_fraction,)
+        row += tuple(weights.ravel().tolist())
+        curve.append(row)
+        if batch % report_every == 0 or batch == 1 or batch == config.batches:
+            if config.actions == 2:
+                shown = " ".join(f"{w:7.3f}" for w in weights)
+            else:
+                shown = f"{100 * push_fraction:6.1f}%  {describe_dead_band(weights)}"
+            print(
+                f"{batch:5}  {row[1]:8}  {row[2]:8.1f}  {row[3]:4}  {row[4]:4}  {shown}"
+            )
+        if config.checkpoint_every and (
+            batch % config.checkpoint_every == 0 or batch == config.batches
+        ):
+            lengths, push_fraction, reversals = evaluate(
+                checkpoint_cartpole,
+                weights,
+                config.rate_from,
+                config.checkpoint_episodes,
+                checkpoint_seed,
+            )
+            test_mean = float(np.mean(lengths))
+            test_return = test_mean * (1 - config.push_cost * push_fraction)
+            since = checkpoints[-1][0] if checkpoints else 0
+            sampled_mean = float(np.mean([r[2] for r in curve[since:batch]]))
+            is_best = test_return >= best_return
+            if is_best:
+                best_weights, best_return, best_batch = (
+                    weights.copy(),
+                    test_return,
+                    batch,
+                )
+            checkpoints.append(
+                (
+                    batch,
+                    sampled_mean,
+                    test_mean,
+                    min(lengths),
+                    test_return,
+                    push_fraction,
+                    reversals,
+                    int(is_best),
+                )
+            )
+            flag = (
+                "  sampling does better"
+                if relies_on_randomness(
+                    sampled_mean, test_mean, checkpoint_cartpole.max_steps
+                )
+                else ""
+            )
+            print(
+                f"      checkpoint: without sampling {test_mean:.1f} steps, pushing "
+                f"{100 * push_fraction:.0f}%; sampled {sampled_mean:.1f}"
+                + ("  (best so far)" if is_best else "")
+                + flag
+            )
+    checkpoint_cartpole.close()
+    return TrainingResult(
+        weights=best_weights if best_weights is not None else weights,
+        final_weights=weights,
+        scales=scales,
+        curve=curve,
+        checkpoints=checkpoints,
+        best_batch=best_batch,
+    )
+
+
 def print_comparison(weights):
     """Print the weights next to the hand-tuned gentle PD gains."""
     if np.ndim(weights) == 2:
@@ -556,6 +673,30 @@ def print_dead_band_comparison(weights):
         )
     else:
         print("  No dead band: coasting never wins, so it always pushes.")
+
+
+def print_checkpoint_summary(result, max_steps):
+    """Say which checkpoint's weights were kept, and whether the policy
+    was relying on its randomness at the end."""
+    best = next(c for c in result.checkpoints if c[0] == result.best_batch)
+    last = result.checkpoints[-1]
+    print()
+    print(
+        f"Keeping the weights from batch {result.best_batch}, the best "
+        f"checkpoint: {best[2]:.1f} steps without sampling, pushing on "
+        f"{100 * best[5]:.0f}% of steps."
+    )
+    if result.best_batch != last[0]:
+        print(
+            f"The final weights (batch {last[0]}: {last[2]:.1f} steps) are saved "
+            "as final-weights.json."
+        )
+    if relies_on_randomness(last[1], last[2], max_steps):
+        print(
+            f"Note: at the end the policy did better sampling its actions "
+            f"({last[1]:.1f} steps) than without sampling ({last[2]:.1f}): it's "
+            "relying on its randomness, which the deterministic controller loses."
+        )
 
 
 def git_version():
@@ -612,18 +753,33 @@ def write_curve(path, curve, actions):
         writer.writerows(curve)
 
 
-def save_run(run_dir, config, weights, curve, test, max_steps, info):
+def write_checkpoints(path, checkpoints):
+    """Write train()'s checkpoint tests as CSV, one row per checkpoint."""
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(CHECKPOINT_COLUMNS)
+        writer.writerows(checkpoints)
+
+
+def save_run(run_dir, config, result, test, max_steps, info):
     """Save everything about a training run in a new directory run_dir.
 
-    test is what evaluate() returned. info holds what else to record in
-    results.json: when the run started, how long training took, the git
-    version of the code and the input scales.
+    result is what train() returned and test what evaluate() returned for
+    its weights. info holds what else to record in results.json: when the
+    run started, how long training took, the git version of the code and
+    the input scales.
     """
+    weights, curve = result.weights, result.curve
     lengths, push_fraction, reversals_per_second = test
     run_dir.mkdir(parents=True)
     save_config(run_dir / "config.json", config)
     save_weights(run_dir / "weights.json", weights, config.rate_from)
     write_curve(run_dir / "curve.csv", curve, config.actions)
+    if result.checkpoints:
+        save_weights(
+            run_dir / "final-weights.json", result.final_weights, config.rate_from
+        )
+        write_checkpoints(run_dir / "checkpoints.csv", result.checkpoints)
     _, _, mean, shortest, longest, *_ = curve[-1]
     results = {
         **info,
@@ -638,6 +794,17 @@ def save_run(run_dir, config, weights, curve, test, max_steps, info):
         "test_push_fraction": push_fraction,
         "test_reversals_per_second": reversals_per_second,
     }
+    if result.checkpoints:
+        best = next(c for c in result.checkpoints if c[0] == result.best_batch)
+        last = result.checkpoints[-1]
+        results["checkpoints"] = {
+            "best_batch": result.best_batch,
+            "best": dict(zip(CHECKPOINT_COLUMNS, best[:-1], strict=False)),
+            "last": dict(zip(CHECKPOINT_COLUMNS, last[:-1], strict=False)),
+            "sampling_does_better_at_last": relies_on_randomness(
+                last[1], last[2], max_steps
+            ),
+        }
     if config.actions == 2:
         results["weights_scaled_to_kp"] = scale_to_kp(weights).tolist()
     else:
@@ -732,14 +899,16 @@ def main():
         commit, dirty = git_version()
         cartpole = CartPole.make(angle_limit=None)  # standard CartPole
         start = time.perf_counter()
-        weights, curve, scales = train(
-            cartpole, config, np.random.default_rng(config.seed)
-        )
+        result = train(cartpole, config, np.random.default_rng(config.seed))
         info["training_seconds"] = round(time.perf_counter() - start, 2)
         info["git_commit"], info["git_dirty"] = commit, dirty
-        info["input_scales"] = scales.tolist() if config.normalize_inputs else None
+        info["input_scales"] = (
+            result.scales.tolist() if config.normalize_inputs else None
+        )
         cartpole.close()
-        rate_from = config.rate_from
+        weights, rate_from = result.weights, config.rate_from
+        if result.checkpoints:
+            print_checkpoint_summary(result, cartpole.max_steps)
 
     print()
     print_comparison(weights)
@@ -759,7 +928,7 @@ def main():
     )
 
     if args.run_dir:
-        save_run(args.run_dir, config, weights, curve, test, cartpole.max_steps, info)
+        save_run(args.run_dir, config, result, test, cartpole.max_steps, info)
         print(f"Saved the run to {os.path.relpath(args.run_dir)}")
     elif args.no_save:
         print("Not saved (--no-save).")

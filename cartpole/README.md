@@ -317,6 +317,8 @@ command-line options from it (`learning_rate` becomes
 | `normalize_inputs` | false | divide each input by its typical size (see below) |
 | `actions` | 2 | 2: push left or right; 3: also don't push (see below) |
 | `push_cost` | 0 | taken off the reward of each pushing step (needs `actions` 3) |
+| `checkpoint_every` | 25 | test without sampling every this many batches, keep the best weights and say whether sampling does better; 0 turns it off |
+| `checkpoint_episodes` | 30 | test episodes at each checkpoint |
 | `batches` | 200 | number of updates |
 | `batch_size` | 10 | episodes per update |
 | `learning_rate` | 10 | step size α |
@@ -330,10 +332,15 @@ only needs the settings it changes:
 - `true-velocities.json`: the policy sees the true velocities
 - `normalized.json`: normalized inputs, with learning rate 3
 - `three-actions.json`: normalized, three actions, push cost 0.3
+- `three-actions-long.json`: the same for 1000 batches
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
-default.
+default. The one deliberate exception so far is `checkpoint_every`,
+which became 25 once checkpoints proved their worth: configs that leave
+it out now keep the best checkpoint rather than the final weights.
+Kept models whose runs predate it say `"checkpoint_every": 0`, so they
+still regenerate exactly.
 
 Each training run is saved in its own directory under `runs/` (ignored
 by git), named by `--run-name` or after the config file and the time:
@@ -345,6 +352,9 @@ by git), named by `--run-name` or after the config file and the time:
   its rate, pole angle, its rate (listed in the file's `inputs`) and in
   those inputs' own units even when training normalized them, with
   their `rate_from`, for `cartpole.py --controller learned --weights`
+- with checkpoints (the default): `checkpoints.csv`, one row per
+  checkpoint test, and `final-weights.json`, the last weights
+  (`weights.json` is then the best checkpoint's)
 - `curve.csv`: the learning curve, one row per batch: episodes so far,
   the batch's mean, shortest and longest episode, and the weights
 - `results.json`: when it ran, how long training took, the git commit
@@ -444,6 +454,39 @@ Results (normalized, learning rate 3, 200 batches, seeds 1 to 4; hard =
 - Noise defeats much of the dead band: differenced rate noise crosses
   the threshold, so in the hard conditions the same policies push on
   40 to 75% of steps.
+
+### Checkpoints: keeping the best weights
+
+Training optimizes the policy as it samples its actions, but the
+controller you keep takes the likeliest action every time, and the two
+can drift apart. A 1000-batch three-action run (push cost 0.3, seed 3)
+ended with a sampled policy lasting about 498 steps while pushing on
+15% of steps, but a deterministic controller lasting only 266: the push
+cost had widened the dead band to about 5.8°, and the sampled policy
+was relying on occasional random pushes inside it, which average out to
+a gentle force that grows the further the pole is off balance.
+
+By default (`checkpoint_every` 25; 0 turns it off), training tests the
+deterministic controller every that many batches (and after the last), scores it by the reward
+training uses (steps survived, less `push_cost` on pushing steps), and
+keeps the best weights so far (ties go to the later checkpoint).
+Checkpoint tests always start from the same positions, so checkpoints
+compare fairly, but not the final test's positions: choosing the best
+checkpoint on the same episodes it's then tested on would flatter it.
+Each checkpoint also compares the deterministic result with the sampled
+training batches since the last one and says "sampling does better" if
+the sampled policy lasted more than a tenth of the episode limit
+longer; the run ends with a note if that's still so at the end. It
+doesn't change training itself, only which weights are kept.
+
+On the run above, with checkpoints every 25 batches, the kept weights
+came from batch 400: 499.6 steps on average in the final test (shortest
+493), pushing on 9.3% of steps and changing direction 0.6 times a
+second, against 266 steps for the final weights. With only 10
+checkpoint episodes it kept batch 900 instead, which looked perfect on
+those 10 but averaged 448 in the final test (shortest 151): a few
+episodes can't tell a robust controller from a lucky one, hence the
+default of 30.
 
 ### Results so far
 

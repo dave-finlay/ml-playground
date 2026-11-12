@@ -7,5 +7,6 @@
   "batch_size": 10,
   "learning_rate": 3.0,
   "gamma": 0.99,
-  "eval_episodes": 20
+  "eval_episodes": 20,
+  "checkpoint_every": 0
 }
