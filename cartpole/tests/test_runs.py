@@ -8,6 +8,15 @@ import runs
 
 
 @pytest.fixture
+def models_dir(tmp_path, monkeypatch):
+    """A temporary models directory in place of cartpole/models/."""
+    directory = tmp_path / "models"
+    directory.mkdir()
+    monkeypatch.setattr(runs, "MODELS_DIR", directory)
+    return directory
+
+
+@pytest.fixture
 def runs_dir(tmp_path, monkeypatch):
     """A temporary runs directory in place of cartpole/runs/."""
     directory = tmp_path / "runs"
@@ -46,6 +55,33 @@ def test_find_run_rejects_directories_outside_runs(runs_dir, tmp_path):
     model = make_run(tmp_path / "models", "kept")  # looks like a run
     with pytest.raises(ValueError, match="not a run"):
         runs.find_run(str(model))
+
+
+def test_promote_copies_the_whole_run(runs_dir, models_dir):
+    run = make_run(runs_dir, "r1", "kept", test_mean=500)
+    (run / "weights.json").write_text("{}")
+    model = runs.promote_run(run, "keeper")
+    assert model == models_dir / "keeper"
+    assert sorted(p.name for p in model.iterdir()) == [
+        "config.json",
+        "results.json",
+        "weights.json",
+    ]
+    assert run.exists()  # copied, not moved
+
+
+def test_promote_never_overwrites_a_model(runs_dir, models_dir):
+    run = make_run(runs_dir, "r1")
+    (models_dir / "r1").mkdir()
+    with pytest.raises(ValueError, match="already exists"):
+        runs.promote_run(run, "r1")
+
+
+@pytest.mark.parametrize("name", ["", "a/b", ".hidden"])
+def test_promote_rejects_unusable_names(runs_dir, models_dir, name):
+    run = make_run(runs_dir, "r1")
+    with pytest.raises(ValueError, match="not a usable model name"):
+        runs.promote_run(run, name)
 
 
 def test_delete_when_confirmed(runs_dir, capsys):

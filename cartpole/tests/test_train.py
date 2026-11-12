@@ -116,7 +116,7 @@ def test_committed_configs_load(path):
 
 @pytest.mark.parametrize(
     "path",
-    sorted(MODELS_DIR.glob("*/train-config.json")),
+    sorted(MODELS_DIR.glob("*/config.json")),
     ids=str,
 )
 def test_model_training_configs_load(path):

@@ -1,11 +1,18 @@
-"""List and delete training runs saved by train.py in cartpole/runs/.
+"""List, promote and delete training runs saved by train.py in
+cartpole/runs/.
 
 Run from the repo root:
 
     uv run python cartpole/runs.py list
+    uv run python cartpole/runs.py promote normalized-b1000
+    uv run python cartpole/runs.py promote normalized-b1000 normalized-seed3-long
     uv run python cartpole/runs.py delete normalized-seed3-again
     uv run python cartpole/runs.py delete cartpole/runs/default-2026*
     uv run python cartpole/runs.py delete --yes slow-lr fast-lr
+
+promote copies a run's whole directory into cartpole/models/ (under the
+run's name unless given another), where git tracks it, so configs can
+rely on it. It never overwrites a model, and it leaves the run in place.
 
 delete accepts run names or paths (so the shell can expand patterns of
 paths), shows what it will delete and asks first unless given --yes. It
@@ -21,6 +28,8 @@ import sys
 from pathlib import Path
 
 from train import RUNS_DIR
+
+MODELS_DIR = Path(__file__).parent / "models"
 
 
 def is_run(path):
@@ -82,6 +91,19 @@ def list_runs():
         print(f"{name:{width}}  {started:16}  {test:>8}  {description}")
 
 
+def promote_run(run_path, model_name):
+    """Copy the run at run_path into MODELS_DIR / model_name and return
+    the model's path. Raise ValueError if model_name isn't a plain name or
+    that model already exists."""
+    if not model_name or "/" in model_name or model_name.startswith("."):
+        raise ValueError(f"not a usable model name: {model_name!r}")
+    model_path = MODELS_DIR / model_name
+    if model_path.exists():
+        raise ValueError(f"model already exists: {model_path}")
+    shutil.copytree(run_path, model_path)
+    return model_path
+
+
 def delete_runs(paths, confirmed):
     """Delete run directories, asking first unless confirmed. Returns
     whether they were deleted."""
@@ -103,6 +125,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list", help="list the runs, oldest first")
+    promote = commands.add_parser(
+        "promote", help="copy a run into cartpole/models/ to keep it"
+    )
+    promote.add_argument("run", help="run name or path")
+    promote.add_argument(
+        "name", nargs="?", help="name for the model (default: the run's name)"
+    )
     delete = commands.add_parser("delete", help="delete runs")
     delete.add_argument("runs", nargs="+", help="run names or paths")
     delete.add_argument("--yes", action="store_true", help="don't ask before deleting")
@@ -111,14 +140,18 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.command == "list":
-        list_runs()
-    else:
-        try:
+    try:
+        if args.command == "list":
+            list_runs()
+        elif args.command == "promote":
+            run_path = find_run(args.run)
+            model_path = promote_run(run_path, args.name or run_path.name)
+            print(f"Copied {run_path.name} to {model_path}")
+        else:
             paths = list(dict.fromkeys(find_run(r) for r in args.runs))
-        except ValueError as e:
-            sys.exit(f"runs.py: error: {e}")
-        delete_runs(paths, args.yes)
+            delete_runs(paths, args.yes)
+    except ValueError as e:
+        sys.exit(f"runs.py: error: {e}")
 
 
 if __name__ == "__main__":

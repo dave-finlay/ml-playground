@@ -84,13 +84,16 @@ in `configs/cartpole/`:
 
 Trained models worth keeping, for configs to point at, go in
 `models/NAME/`, which is tracked by git (`runs/` isn't, so a config
-pointing into `runs/` only works where that run exists). Each is a kept
-copy of a training run's two key files: `weights.json`, the learned
-weights, and `train-config.json`, the training settings that made them
-(the run's `config.json`, renamed so it isn't mistaken for a
-`cartpole.py` config). Since it includes the seed, it regenerates the
-weights exactly:
-`train.py --config cartpole/models/NAME/train-config.json`.
+pointing into `runs/` only works where that run exists). A model is a
+kept copy of a training run's directory, with the same files:
+`weights.json`, the learned weights, and `config.json`, the training
+settings that made them (a `train.py` config, not a `cartpole.py`
+one), plus `results.json` and `curve.csv` when the run had them. Since
+`config.json` includes the seed, it regenerates the weights exactly:
+`train.py --config cartpole/models/NAME/config.json`. And since a
+model is laid out like a run, `train.py --load cartpole/models/NAME`
+tests and shows it. `runs.py promote RUN [NAME]` makes a model from a
+run.
 So the layout is: settings you write in `configs/` (`train/` for
 `train.py`, `cartpole/` for `cartpole.py`), results worth keeping in
 `models/`, and every training run in `runs/`.
@@ -349,13 +352,16 @@ by git), named by `--run-name` or after the config file and the time:
 nothing, for quick experiments. `--load runs/NAME` skips training and
 tests and shows a saved run with its saved settings.
 
-`runs.py` lists and deletes runs. `delete` takes run names or paths
-(so the shell can expand patterns), shows what it will delete and asks
+`runs.py` lists, promotes and deletes runs. `promote` copies a run
+into `models/` to keep it (see above), under the run's name or one you
+give, never overwriting a model. `delete` takes run names or paths (so
+the shell can expand patterns), shows what it will delete and asks
 first unless given `--yes`. It only deletes run directories directly
 inside `runs/`, so it can't touch `models/` or anything else.
 
 ```sh
 uv run python cartpole/runs.py list                       # name, start time, test result, description
+uv run python cartpole/runs.py promote normalized-b1000            # keep it as models/normalized-b1000
 uv run python cartpole/runs.py delete normalized-seed3-again
 uv run python cartpole/runs.py delete cartpole/runs/default-2026*
 ```
