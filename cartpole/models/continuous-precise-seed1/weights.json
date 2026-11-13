@@ -1,0 +1,17 @@
+{
+  "kind": "continuous",
+  "force": "weights · inputs newtons, capped at the maximum force",
+  "weights": [
+    0.9380344654762393,
+    0.590973671695968,
+    23.340745539095618,
+    2.506766686479936
+  ],
+  "inputs": [
+    "cart position (m)",
+    "cart position rate (m/s)",
+    "pole angle (rad)",
+    "pole angle rate (rad/s)"
+  ],
+  "rate_from": "difference"
+}

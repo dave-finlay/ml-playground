@@ -1,0 +1,19 @@
+{
+  "description": "Continuous force, normalized, rewarded for survival less costs for pole angle and cart position",
+  "seed": 1,
+  "rate_from": "difference",
+  "normalize_inputs": true,
+  "actions": "continuous",
+  "force_std": 5.0,
+  "push_cost": 0.0,
+  "force_cost": 0.0,
+  "angle_cost": 0.3,
+  "position_cost": 0.2,
+  "batches": 200,
+  "batch_size": 10,
+  "learning_rate": 1.0,
+  "gamma": 0.99,
+  "eval_episodes": 20,
+  "checkpoint_every": 25,
+  "checkpoint_episodes": 30
+}

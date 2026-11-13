@@ -1,0 +1,8 @@
+{
+  "description": "Learned continuous controller (Gaussian REINFORCE with angle and position costs, seed 1, a PD controller with learned gains), with noisy sensors: 1 degree of angle noise, a 1 degree offset and 1 cm of position noise",
+  "controller": "learned",
+  "weights": "cartpole/models/continuous-precise-seed1/weights.json",
+  "angle_noise": 1.0,
+  "angle_offset": 1.0,
+  "position_noise": 0.01
+}

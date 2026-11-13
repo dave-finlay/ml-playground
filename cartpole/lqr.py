@@ -156,8 +156,9 @@ def solve_lqr(a, b, q, r, gamma, tolerance=1e-12, max_iterations=1_000_000):
 def closed_loop_modes(a, b, gains, tau):
     """The closed loop's modes with force = gains · state, as (decay rate
     per second, oscillation frequency in hertz) pairs, slowest decay
-    first, each oscillating pair of poles once. A positive decay rate means the mode dies away; it falls to
-    a third (1/e) in 1/rate seconds."""
+    first, each oscillating pair of poles once. A positive decay rate
+    means the mode dies away; it falls to a third (1/e) in 1/rate
+    seconds."""
     modes = []
     for z in np.linalg.eigvals(a + b @ np.atleast_2d(gains)):
         if z.imag < 0:

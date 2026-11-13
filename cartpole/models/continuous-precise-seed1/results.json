@@ -1,0 +1,67 @@
+{
+  "started": "2026-11-12T15:02:15-08:00",
+  "training_seconds": 6.01,
+  "git_commit": "e39a056d6584dd2897be143ff7688f01029f1d06",
+  "git_dirty": true,
+  "input_scales": [
+    0.11135541348458677,
+    0.2893880712798366,
+    0.08611208811246412,
+    0.4370615248067328
+  ],
+  "last_batch_lengths": {
+    "mean": 500.0,
+    "min": 500,
+    "max": 500
+  },
+  "test_lengths": {
+    "episodes": 20,
+    "mean": 500.0,
+    "min": 500,
+    "max": 500,
+    "limit": 500
+  },
+  "test_mean_return": 499.87603759765625,
+  "test_push_fraction": 1.0,
+  "test_reversals_per_second": 0.53,
+  "test_quality": {
+    "rms_angle_degrees": 0.3150924814761488,
+    "rms_position": 0.03763366498272626,
+    "mean_force": 0.044026211918681786,
+    "push_fraction": 1.0,
+    "reversals_per_second": 0.53
+  },
+  "checkpoints": {
+    "best_batch": 175,
+    "best": {
+      "batch": 175,
+      "sampled_mean_length": 497.404,
+      "test_mean_length": 500.0,
+      "test_min_length": 500,
+      "test_mean_return": 499.89422607421875,
+      "test_push_fraction": 1.0,
+      "test_reversals_per_second": 0.5333333333333333,
+      "test_mean_force": 0.03965937807665766,
+      "test_rms_angle_degrees": 0.29686439812337734
+    },
+    "last": {
+      "batch": 200,
+      "sampled_mean_length": 492.8639999999999,
+      "test_mean_length": 500.0,
+      "test_min_length": 500,
+      "test_mean_return": 499.89251708984375,
+      "test_push_fraction": 1.0,
+      "test_reversals_per_second": 0.5533333333333333,
+      "test_mean_force": 0.028831962122606764,
+      "test_rms_angle_degrees": 0.24596637448828937
+    },
+    "sampling_does_better_at_last": false
+  },
+  "gains": {
+    "kx": 0.9380344654762393,
+    "kv": 0.590973671695968,
+    "kp": 23.340745539095618,
+    "kd": 2.506766686479936
+  },
+  "final_force_std": 1.5100080076859226
+}

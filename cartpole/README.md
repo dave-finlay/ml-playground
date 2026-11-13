@@ -83,6 +83,12 @@ in `configs/cartpole/`:
   controller, the trained model in `models/normalized-seed3/`
 - `lqr-precise.json`: the LQR gains for angle cost 0.3, position cost
   0.2 and force cost 0.3, made by `lqr.py` (see below)
+- `pd-noisy-sensors.json`, `learned-noisy-sensors.json`,
+  `lqr-noisy-sensors.json`: PD, learned and LQR controllers with noisy
+  sensors: 1° of angle noise, a 1° offset and 1 cm of position noise, a
+  realistic level for a cart's position sensor. The learned one is the
+  continuous controller in `models/continuous-precise-seed1` (a PD
+  controller with learned gains), not the two-action model.
 
 Trained models worth keeping, for configs to point at, go in
 `models/NAME/`, which is tracked by git (`runs/` isn't, so a config
@@ -113,16 +119,32 @@ uv run python cartpole/cartpole.py --controller pd --kp 20 --kd 3
 uv run python cartpole/cartpole.py --controller p --track-limit 2.4 --max-steps 500  # standard limits
 ```
 
-The controller doesn't see the true state but a reading from an
-`AngleSensor`, which can get the pole angle wrong in three ways (all off
-by default):
+The controller doesn't see the true state but readings from a
+`Sensor`, which can get the pole angle wrong in three ways and the cart
+position in one (all off by default):
 
 - `--angle-noise`: random noise, a fresh normal random number each
   step with this standard deviation in degrees
 - `--angle-scale`: a scale error, reading = scale × true angle
 - `--angle-offset`: an offset error in degrees, added to every reading
+- `--position-noise`: random noise on the cart position, standard
+  deviation in metres. It has its own random stream, so a seed gives
+  the same angle noise with or without it.
 
-The printed trace shows both the true angle and the reading.
+The two velocities pass through perfectly, but controllers estimating
+rates from successive readings (the default) never use them. The
+printed trace shows the true position and angle and their readings.
+
+Position noise reaches the force mostly through Kv: differencing turns
+σ of position noise into about σ·√2 / 0.02 s ≈ 71σ m/s of velocity
+noise. With 1° angle noise and a 1° offset as well (10 seeds, RMS angle
+and mean force):
+
+| position noise | 0 | 1 cm | 5 cm | 10 cm |
+|---|---|---|---|---|
+| `pd-noise-offset.json` (Kv 1) | 0.93°, 2.7 N | 0.94°, 2.8 N | 1.21°, 3.6 N | 5.32°, 5.2 N |
+| learned continuous (Kv 0.59) | 0.98°, 2.7 N | 0.98°, 2.7 N | 1.07°, 3.2 N | 1.57°, 4.2 N |
+| `lqr-precise.json` (Kv 3.5) | 2.68°, 7.4 N | 2.77°, 7.5 N | 4.50°, 8.0 N | fails 10/10 |
 
 `--track-limit` (default 5 m from the centre) and `--max-steps`
 (default 1000 steps, 20 s) change when an episode ends. Both defaults

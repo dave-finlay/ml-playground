@@ -1,0 +1,11 @@
+{
+  "description": "LQR gains for angle cost 0.3, position cost 0.2, force cost 0.3, with noisy sensors: 1 degree of angle noise, a 1 degree offset and 1 cm of position noise",
+  "controller": "pd",
+  "kp": 59.6436,
+  "kd": 11.3318,
+  "kx": 1.7826,
+  "kv": 3.4794,
+  "angle_noise": 1.0,
+  "angle_offset": 1.0,
+  "position_noise": 0.01
+}

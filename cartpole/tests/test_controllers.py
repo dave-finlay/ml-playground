@@ -13,6 +13,7 @@ from cartpole import (
     LinearController,
     PDController,
     RateEstimator,
+    Sensor,
     SimulationConfig,
     Smoother,
     ThreeActionController,
@@ -297,3 +298,34 @@ def test_control_quality():
     assert quality["mean_force"] == pytest.approx(6.25)
     assert quality["push_fraction"] == pytest.approx(0.75)
     assert quality["reversals_per_second"] == pytest.approx(1 / 2.0)  # 1 in 2 s
+
+
+STATE = (0.3, -0.4, 0.05, 0.2)
+
+
+def test_sensor_is_perfect_by_default():
+    assert Sensor().read(STATE) == STATE
+
+
+def test_position_noise_has_the_given_spread():
+    sensor = Sensor(position_noise_std=0.02, seed=3)
+    readings = [sensor.read(STATE) for _ in range(20000)]
+    positions = [r[0] - STATE[0] for r in readings]
+    mean = sum(positions) / len(positions)
+    spread = math.sqrt(sum((p - mean) ** 2 for p in positions) / len(positions))
+    assert abs(mean) < 0.001 and spread == pytest.approx(0.02, rel=0.03)
+    assert {r[2] for r in readings} == {STATE[2]}  # the angle stays perfect
+
+
+def test_position_noise_leaves_the_angle_noise_unchanged():
+    """Position noise has its own random stream, so a seed gives the same
+    angle noise with or without it."""
+    angle_only = Sensor(noise_std=0.01, seed=5)
+    both = Sensor(noise_std=0.01, position_noise_std=0.05, seed=5)
+    for _ in range(100):
+        assert angle_only.read(STATE)[2] == both.read(STATE)[2]
+
+
+def test_sensor_scale_and_offset_apply_to_the_angle():
+    x, _, theta, _ = Sensor(scale=2.0, offset=0.01).read(STATE)
+    assert x == STATE[0] and theta == pytest.approx(2 * 0.05 + 0.01)
