@@ -346,6 +346,8 @@ command-line options from it (`learning_rate` becomes
 | `angle_cost` | 0 | taken off the reward times (pole angle / 12°)² |
 | `position_cost` | 0 | taken off the reward times (cart position / 2.4 m)² |
 | `angle_noise`, `angle_scale`, `angle_offset`, `position_noise` | perfect | sensor errors in training, checkpoints and the final test, as in `cartpole.py` |
+| `track_limit` | 2.4 | metres from the centre before an episode ends; `position_cost` is relative to it |
+| `max_steps` | 500 | longest episode, in steps of 0.02 s |
 | `checkpoint_every` | 25 | test without sampling every this many batches, keep the best weights and say whether sampling does better; 0 turns it off |
 | `checkpoint_episodes` | 30 | test episodes at each checkpoint |
 | `batches` | 200 | number of updates |
@@ -367,6 +369,7 @@ only needs the settings it changes:
   costs
 - `continuous-noisy.json`: the same plus a force cost, trained with 1°
   of angle noise and 1 cm of position noise
+- `continuous-noisy-long.json`: the same on a 5 m track for up to 20 s
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
@@ -653,6 +656,19 @@ noise, a 1° offset, 1 cm position noise):
   policy sees them; or estimating them properly with a Kalman filter,
   which would let a controller keep its damping without amplifying the
   noise.
+
+Longer episodes (`track_limit` 5, `max_steps` 1000, as in the tests)
+helped only partly. With the same noise and costs, 3 of 4 seeds passed
+every test (the 4th never learned to balance in any design: its
+training episodes stayed short), with noisy-sensor precision of 2.4° to
+3.4° at about 1.1 to 1.4 N, much as before. Kv stayed slightly
+negative. On the linear model (`lqr.py`'s), the passing seeds' cart
+mode still grows, at 0.05 to 0.07 per second: by about e in 15 to 20 s,
+so a 20 s episode sees it grow only about threefold, which costs
+little. The failing seeds' cart modes grow at 0.15 to 0.3 per second.
+Their pole modes decay at only 0.3 to 0.46 per second against the
+hand-tuned PD's 0.96 (all of whose modes decay): under-damped. The root
+cause is the noisy rate estimates, which longer episodes can't fix.
 
 ## lqr.py: the optimal linear controller
 

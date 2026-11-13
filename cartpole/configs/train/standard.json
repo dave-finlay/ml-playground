@@ -13,6 +13,8 @@
   "angle_scale": 1.0,
   "angle_offset": 0.0,
   "position_noise": 0.0,
+  "track_limit": 2.4,
+  "max_steps": 500,
   "batches": 200,
   "batch_size": 10,
   "learning_rate": 10.0,

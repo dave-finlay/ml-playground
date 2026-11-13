@@ -18,6 +18,7 @@ from train import (
     count_reversals,
     dead_band,
     discounted_returns,
+    make_cartpole,
     make_sensor,
     play_episode,
     policy_gradient,
@@ -128,6 +129,8 @@ def test_scale_to_kp():
         {"actions": "continuous", "push_cost": 0.1},  # needs three actions
         {"angle_noise": -1.0},
         {"position_noise": -0.01},
+        {"track_limit": 0.0},
+        {"max_steps": 0},
     ],
 )
 def test_train_config_rejects_out_of_range(changes):
@@ -470,3 +473,13 @@ def test_training_with_noise_is_repeatable(capsys):
     assert first.curve == second.curve
     quiet = training_result(dataclasses.replace(config, angle_noise=0.0), capsys)
     assert quiet.curve != first.curve
+
+
+def test_training_limits_set_the_cartpole():
+    cartpole = make_cartpole(TrainConfig(track_limit=5.0, max_steps=1000))
+    assert (cartpole.track_limit, cartpole.max_steps) == (5.0, 1000)
+    assert cartpole.angle_limit == cartpole.normal_angle_limit  # still 12 degrees
+    cartpole.close()
+    standard = make_cartpole(TrainConfig())
+    assert (standard.track_limit, standard.max_steps) == (2.4, 500)
+    standard.close()

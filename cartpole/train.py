@@ -26,7 +26,8 @@ change which controllers it can express: weights w' on s / scales are
 weights w' / scales on s, and the weights are converted back like that
 for printing and saving.
 
-Training uses standard CartPole: 12 degrees, 2.4 m and 500 steps (10 s).
+Training uses standard CartPole by default: 12 degrees, 2.4 m and 500
+steps (10 s); track_limit and max_steps change the last two.
 Afterwards the trained policy plays without sampling, always taking the
 likelier action, which makes it a controller like the hand-tuned ones in
 cartpole.py: push right when w · s >= 0 (cartpole.py's LinearController).
@@ -189,6 +190,14 @@ class TrainConfig:
     position_noise: float = setting(
         0.0, "cart position sensor noise: standard deviation in metres"
     )
+    track_limit: float = setting(
+        2.4,
+        "how far the cart may go from the centre before an episode ends, in "
+        "metres (standard CartPole: 2.4); position_cost is relative to it",
+    )
+    max_steps: int = setting(
+        500, "longest episode, in steps of 0.02 s (standard CartPole: 500)"
+    )
     batches: int = setting(200, "number of weight updates")
     batch_size: int = setting(10, "episodes played per update")
     learning_rate: float = setting(10.0, "step size for each update")
@@ -212,7 +221,13 @@ class TrainConfig:
     def __post_init__(self):
         if self.checkpoint_every < 0:
             raise ValueError("checkpoint_every should be at least 0")
-        for name in ("batches", "batch_size", "eval_episodes", "checkpoint_episodes"):
+        for name in (
+            "batches",
+            "batch_size",
+            "eval_episodes",
+            "checkpoint_episodes",
+            "max_steps",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} should be at least 1")
         if self.learning_rate <= 0:
@@ -232,6 +247,8 @@ class TrainConfig:
             raise ValueError("push_cost needs actions 3")
         if self.force_cost and self.actions != "continuous":
             raise ValueError("force_cost needs actions continuous")
+        if self.track_limit <= 0:
+            raise ValueError("track_limit should be more than 0")
         for name in ("angle_noise", "position_noise"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} should be at least 0")
@@ -450,6 +467,18 @@ class Costs:
 
 
 NO_COSTS = Costs()
+
+
+def make_cartpole(config, **kwargs):
+    """A CartPole with config's track and episode limits and standard
+    CartPole's 12 degree angle limit. kwargs go to CartPole.make (for
+    drawing to a window)."""
+    return CartPole.make(
+        angle_limit=None,
+        track_limit=config.track_limit,
+        max_steps=config.max_steps,
+        **kwargs,
+    )
 
 
 def make_sensor(config, seed):
@@ -719,7 +748,7 @@ def train(cartpole, config, rng, report_every=10):
     kind, costs = weights_kind_for(config.actions), Costs.of(config)
     curve, checkpoints = [], []
     best_weights, best_return, best_batch = None, -math.inf, config.batches
-    checkpoint_cartpole = CartPole.make(angle_limit=None)
+    checkpoint_cartpole = make_cartpole(config)
     checkpoint_seed = (config.seed or 0) + CHECKPOINT_SEED_OFFSET
     if config.actions == 2:
         shown_heading = "weights (x, x rate, angle, angle rate)"
@@ -1146,7 +1175,7 @@ def main():
             "started": datetime.datetime.now().astimezone().isoformat("T", "seconds")
         }
         commit, dirty = git_version()
-        cartpole = CartPole.make(angle_limit=None)  # standard CartPole
+        cartpole = make_cartpole(config)
         start = time.perf_counter()
         result = train(cartpole, config, np.random.default_rng(config.seed))
         info["training_seconds"] = round(time.perf_counter() - start, 2)
@@ -1162,7 +1191,7 @@ def main():
 
     print()
     print_comparison(weights, kind)
-    cartpole = CartPole.make(angle_limit=None)
+    cartpole = make_cartpole(config)
     test = evaluate(
         cartpole,
         weights,
@@ -1191,7 +1220,7 @@ def main():
         print("Not saved (--no-save).")
 
     if not args.no_window:
-        cartpole = CartPole.make(render_mode="human", slow=args.slow, angle_limit=None)
+        cartpole = make_cartpole(config, render_mode="human", slow=args.slow)
         controller = controller_from_weights(
             weights, cartpole.tau, FORCE, rate_from, kind
         )
