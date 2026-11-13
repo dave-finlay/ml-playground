@@ -921,7 +921,7 @@ def curve_columns(actions):
 def write_curve(path, curve, actions):
     """Write the learning curve from train() as CSV, one row per batch."""
     with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(curve_columns(actions))
         writer.writerows(curve)
 
@@ -929,7 +929,7 @@ def write_curve(path, curve, actions):
 def write_checkpoints(path, checkpoints):
     """Write train()'s checkpoint tests as CSV, one row per checkpoint."""
     with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(CHECKPOINT_COLUMNS)
         writer.writerows(checkpoints)
 

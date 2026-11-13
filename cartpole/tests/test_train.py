@@ -23,6 +23,8 @@ from train import (
     relies_on_randomness,
     scale_to_kp,
     train,
+    write_checkpoints,
+    write_curve,
 )
 
 CONFIGS_DIR = Path(__file__).parent.parent / "configs" / "train"
@@ -411,3 +413,11 @@ def test_continuous_training_learns(capsys):
     assert result.force_std > 0
     mean_lengths = [row[2] for row in result.curve]
     assert np.mean(mean_lengths[-10:]) > 3 * np.mean(mean_lengths[:10])
+
+
+def test_csv_files_use_unix_line_endings(tmp_path):
+    write_curve(tmp_path / "curve.csv", [(1, 10, 20.0, 10, 30, 1, 2, 3, 4)], 2)
+    write_checkpoints(tmp_path / "checkpoints.csv", [(25, 1, 2, 3, 4, 5, 6, 7, 8, 1)])
+    for name in ("curve.csv", "checkpoints.csv"):
+        text = (tmp_path / name).read_bytes()
+        assert b"\r" not in text and text.count(b"\n") == 2
