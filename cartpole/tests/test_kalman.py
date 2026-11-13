@@ -94,3 +94,14 @@ def test_without_an_offset_state_the_angle_is_biased():
 def test_noise_guesses_must_be_positive():
     with pytest.raises(ValueError):
         KalmanEstimator(PHYSICS, angle_noise=0.0)
+
+
+def test_applied_force_is_used_when_none_is_given():
+    _, readings, forces = linear_episode(50, offset=0.0, noise=(0.01, 0.01), seed=3)
+    given = KalmanEstimator(PHYSICS)
+    told = KalmanEstimator(PHYSICS)
+    told.update(readings[0])
+    given.update(readings[0])
+    for reading, force in zip(readings[1:], forces, strict=True):
+        told.applied(force)
+        assert told.update(reading) == given.update(reading, force)

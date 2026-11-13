@@ -1,0 +1,15 @@
+{
+  "description": "Continuous force trained on a Kalman filter's estimates with noisy sensors (1 degree of angle noise, a 1 degree offset, 1 cm of position noise) on a 5 m track for up to 20 s, with angle, position and force costs",
+  "normalize_inputs": true,
+  "learning_rate": 1.0,
+  "actions": "continuous",
+  "rate_from": "kalman",
+  "angle_cost": 0.3,
+  "position_cost": 0.2,
+  "force_cost": 0.3,
+  "angle_noise": 1.0,
+  "angle_offset": 1.0,
+  "position_noise": 0.01,
+  "track_limit": 5.0,
+  "max_steps": 1000
+}

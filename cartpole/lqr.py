@@ -226,8 +226,10 @@ def main():
     cartpole.close()
     print_result(config, gains, closed_loop_modes(a, b, gains, cartpole.tau))
     print()
-    print("To run it:")
+    print("To run it, on differenced readings or on a Kalman filter's estimates")
+    print("(LQR acting on a Kalman filter's estimates is LQG):")
     print(f"  {pd_command(gains)}")
+    print(f"  {pd_command(gains)} --rate-from kalman")
     if args.save:
         save_simulation_config(args.save, gains, config)
         print(f"Saved a cartpole.py config to {args.save}")

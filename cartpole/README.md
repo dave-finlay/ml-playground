@@ -89,6 +89,9 @@ in `configs/cartpole/`:
   realistic level for a cart's position sensor. The learned one is the
   continuous controller in `models/continuous-precise-seed1` (a PD
   controller with learned gains), not the two-action model.
+- `lqg-noisy-sensors.json`, `pd-kalman-noisy-sensors.json`: the LQR and
+  gentle PD gains acting on a Kalman filter's estimates (`rate_from`
+  kalman), with the same noisy sensors
 
 Trained models worth keeping, for configs to point at, go in
 `models/NAME/`, which is tracked by git (`runs/` isn't, so a config
@@ -370,6 +373,9 @@ only needs the settings it changes:
 - `continuous-noisy.json`: the same plus a force cost, trained with 1°
   of angle noise and 1 cm of position noise
 - `continuous-noisy-long.json`: the same on a 5 m track for up to 20 s
+- `continuous-kalman.json`: continuous force trained on a Kalman
+  filter's estimates, with noisy sensors including a 1° offset, on a 5 m
+  track for up to 20 s
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
@@ -771,6 +777,47 @@ still at least 18 times better than differencing; scaling both alike
 changed nothing. Trusting the model more did better here because the
 simulation is the model near upright; a real cart's model would be
 less exact.
+
+### Controlling with the filter's estimates
+
+`rate_from` kalman (in `cartpole.py`, and as a training setting) makes
+a controller act on the filter's estimates of all four numbers, the
+angle's offset removed, instead of the readings and their differences.
+Each controller tells its estimator the force it applied, which the
+filter predicts from. In `cartpole.py`, `--rate-from` also overrides a
+learned weights file's own setting, so weights trained on differenced
+readings can run on the filter.
+
+On the 5 m track for 20 s, 10 seeds (survival, RMS angle and cart
+position, mean force):
+
+| controller | perfect | noisy sensors | 2° + 2 cm | 2° + 1° offset + 10 cm |
+|---|---|---|---|---|
+| PD, differenced, smoothing 0.1 | 0.20°, 0.02 m | 0.94°, 0.65 m, 2.8 N | 4.2°, 5.1 N | 0/10 |
+| PD, Kalman | 0.23°, 0.03 m | 1.75°, 0.18 m, 0.4 N | 3.4°, 0.9 N | 10/10, 3.6°, 0.9 N |
+| learned (`continuous-precise-seed1`), differenced | 0.20°, 0.02 m | 0.98°, 0.45 m, 2.7 N | 3.1°, 5.0 N | 10/10, 4.9°, 5.6 N |
+| learned, Kalman | 0.21°, 0.03 m | 1.55°, 0.17 m, 0.4 N | 3.0°, 0.8 N | 10/10, 3.1°, 0.9 N |
+| LQR, differenced | 0.12°, 0.02 m | 2.77°, 0.56 m, 7.5 N | 1/10 | 0/10 |
+| LQR + Kalman = LQG | 0.14°, 0.03 m | 0.86°, 0.15 m, 0.5 N | 1.7°, 1.0 N | 10/10, 1.75°, 1.0 N |
+
+- With the filter every controller survives every scenario, pushing
+  about 0.4 to 1 N instead of 2.7 to 9 N, and the cart no longer parks
+  off-centre, because the filter removes the angle offset.
+- LQG is the best controller under noise: the stiff LQR gains that
+  differenced noise ruined pay off once the estimates are clean.
+- The gentle PD gains, tuned to tolerate noisy differences, are less
+  precise on the filter (1.75° against 0.94° with noisy sensors) but
+  far gentler.
+
+Training on the filter's estimates (`continuous-kalman.json`: 1° angle
+noise, a 1° offset, 1 cm position noise, 5 m track, 20 s) undoes what
+training on noisy readings did: Kd stayed at 1.9 to 3.3 and Kv
+positive (0.4 to 1.0 in 7 of 8 runs), near the hand-tuned values,
+instead of shrinking toward zero. With the force cost, all 4 seeds survived every scenario above
+(noisy sensors 1.2° to 1.6° at 0.4 to 0.5 N; 2° + 1° offset + 10 cm
+2.4° to 3.3° at 0.8 to 1.0 N); without it, 2 of 4 seeds misbehaved. LQG
+stays the most precise: training's gains (Kp 26 to 31) are softer than
+LQR's optimum (60).
 
 ## Tests
 

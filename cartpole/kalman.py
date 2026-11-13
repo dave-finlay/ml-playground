@@ -104,6 +104,7 @@ class KalmanEstimator:
         self.state = np.zeros(size)
         self.covariance = np.diag(np.square(INITIAL_STD[:size]))
         self._started = False
+        self._applied = 0.0
 
     @property
     def offset(self):
@@ -127,13 +128,18 @@ class KalmanEstimator:
         keep = np.eye(len(self.state)) - gain @ self.h
         self.covariance = keep @ self.covariance @ keep.T + gain @ self.r @ gain.T
 
+    def applied(self, force):
+        """Note the force applied after the latest reading, for update() to
+        predict from if it isn't given one."""
+        self._applied = force
+
     def update(self, reading, force=None):
         """Take the next reading (x, x_rate, angle, angle_rate; only the
         position and angle are used) and the force applied since the last
-        one (None for the first reading), and return the estimated
-        (x, x_rate, angle, angle_rate)."""
+        one (by default, the one given to applied()), and return the
+        estimated (x, x_rate, angle, angle_rate)."""
         if self._started:
-            self.predict(force)
+            self.predict(self._applied if force is None else force)
         self._started = True
         x, _, theta, _ = reading
         self.correct(x, theta)

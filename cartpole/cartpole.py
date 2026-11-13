@@ -342,6 +342,36 @@ class RateEstimator:
         x_rate = self._x_rate_smoother.update(x_dot)
         return (x, x_rate, theta, theta_rate)
 
+    def applied(self, force):
+        """Told the force the controller applied; differencing doesn't
+        need it (a Kalman filter does)."""
+
+
+RATE_SOURCES = ("difference", "velocity", "kalman")
+
+
+def make_rate_estimator(dt, rate_from="difference", smoothing=0.0, physics=None):
+    """The estimator a controller turns readings into its four numbers
+    with: a RateEstimator for "difference" or "velocity", or for
+    "kalman" a Kalman filter (kalman.py), which estimates all four
+    numbers, including an angle with the sensor's offset removed, from
+    the position and angle readings and the model. The filter needs the
+    simulation's physics (CartPole.physics) and doesn't take smoothing.
+
+    Either way, call update(reading) for the estimate and applied(force)
+    with the force then applied, which the filter uses to predict the
+    next step.
+    """
+    if rate_from not in RATE_SOURCES:
+        raise ValueError(f"unknown rate_from: {rate_from!r}")
+    if rate_from == "kalman":
+        if physics is None:
+            raise ValueError('rate_from "kalman" needs the physics')
+        if smoothing:
+            raise ValueError('smoothing doesn\'t apply to rate_from "kalman"')
+        return KalmanEstimator(physics)
+    return RateEstimator(dt, rate_from, smoothing)
+
 
 class PDController:
     """Proportional-derivative controller on the pole angle and, optionally,
@@ -368,10 +398,10 @@ class PDController:
     fails too (above about 2 N·s/m with kp = 20, kd = 3): it undoes the
     damping of the pole's swing.
 
-    dt, rate_from and smoothing say how the rates are estimated (see
-    RateEstimator). Late damping is weaker damping, so too much smoothing
-    brings swings back. A PDController remembers previous readings, so use
-    a new one for each episode.
+    dt, rate_from, smoothing and physics say how the rates are estimated
+    (see make_rate_estimator). Late damping is weaker damping, so too much
+    smoothing brings swings back. A PDController remembers previous
+    readings, so use a new one for each episode.
     """
 
     def __init__(
@@ -384,18 +414,21 @@ class PDController:
         smoothing=0.0,
         kx=0.0,
         kv=0.0,
+        physics=None,
     ):
         self.kp = kp
         self.kd = kd
         self.kx = kx
         self.kv = kv
         self.max_force = max_force
-        self._rates = RateEstimator(dt, rate_from, smoothing)
+        self._rates = make_rate_estimator(dt, rate_from, smoothing, physics)
 
     def __call__(self, reading):
         x, x_rate, theta, theta_rate = self._rates.update(reading)
         force = self.kp * theta + self.kd * theta_rate + self.kx * x + self.kv * x_rate
-        return clamp(force, self.max_force)
+        force = clamp(force, self.max_force)
+        self._rates.applied(force)
+        return force
 
 
 # What each of a LinearController's four weights multiplies, in order.
@@ -484,23 +517,27 @@ class LinearController:
     weights play the roles of the PD controller's Kx, Kv, Kp and Kd, but
     only their ratios matter, since only the sign of the sum is used.
 
-    dt and rate_from say how the rates are estimated (see RateEstimator).
-    Use the same rate_from the weights were learned with. A
-    LinearController remembers previous readings, so use a new one for
-    each episode.
+    dt, rate_from and physics say how the rates are estimated (see
+    make_rate_estimator). Use the same rate_from the weights were learned
+    with. A LinearController remembers previous readings, so use a new one
+    for each episode.
     """
 
-    def __init__(self, weights, dt, max_force=10.0, rate_from="difference"):
+    def __init__(
+        self, weights, dt, max_force=10.0, rate_from="difference", physics=None
+    ):
         if len(weights) != 4:
             raise ValueError(f"need 4 weights, got {len(weights)}")
         self.weights = list(weights)
         self.max_force = max_force
-        self._rates = RateEstimator(dt, rate_from)
+        self._rates = make_rate_estimator(dt, rate_from, physics=physics)
 
     def __call__(self, reading):
         inputs = self._rates.update(reading)
         total = sum(w * v for w, v in zip(self.weights, inputs, strict=True))
-        return self.max_force if total >= 0 else -self.max_force
+        force = self.max_force if total >= 0 else -self.max_force
+        self._rates.applied(force)
+        return force
 
 
 class ThreeActionController:
@@ -518,18 +555,20 @@ class ThreeActionController:
     force once they outgrow the bias: a dead band.
 
     It's what train.py's three-action policy does once trained, taking the
-    likeliest action instead of sampling. dt and rate_from say how the
-    rates are estimated (see RateEstimator); use the rate_from the weights
-    were learned with. It remembers previous readings, so use a new one
-    for each episode.
+    likeliest action instead of sampling. dt, rate_from and physics say how
+    the rates are estimated (see make_rate_estimator); use the rate_from
+    the weights were learned with. It remembers previous readings, so use
+    a new one for each episode.
     """
 
-    def __init__(self, weights, dt, max_force=10.0, rate_from="difference"):
+    def __init__(
+        self, weights, dt, max_force=10.0, rate_from="difference", physics=None
+    ):
         if len(weights) != 3 or any(len(row) != 5 for row in weights):
             raise ValueError("need 3 rows of 5 weights")
         self.weights = [list(row) for row in weights]
         self.max_force = max_force
-        self._rates = RateEstimator(dt, rate_from)
+        self._rates = make_rate_estimator(dt, rate_from, physics=physics)
 
     def __call__(self, reading):
         inputs = (*self._rates.update(reading), 1.0)
@@ -537,25 +576,36 @@ class ThreeActionController:
             sum(w * v for w, v in zip(row, inputs, strict=True)) for row in self.weights
         )
         if coast >= max(left, right):
-            return 0.0
-        return self.max_force if right >= left else -self.max_force
+            force = 0.0
+        else:
+            force = self.max_force if right >= left else -self.max_force
+        self._rates.applied(force)
+        return force
 
 
 def controller_from_weights(
-    weights, dt, max_force=10.0, rate_from="difference", kind=None
+    weights, dt, max_force=10.0, rate_from="difference", kind=None, physics=None
 ):
     """Build the controller for weights of the given kind (by default
     two-action or three-action, by their shape). Continuous weights make
-    a PDController, whose gains Kx, Kv, Kp and Kd are the weights."""
+    a PDController, whose gains Kx, Kv, Kp and Kd are the weights.
+    physics is needed for rate_from "kalman"."""
     kind = kind or weights_kind(weights)
     if kind == THREE_ACTION:
-        return ThreeActionController(weights, dt, max_force, rate_from)
+        return ThreeActionController(weights, dt, max_force, rate_from, physics)
     if kind == CONTINUOUS:
         kx, kv, kp, kd = weights
         return PDController(
-            kp, kd, dt, max_force=max_force, rate_from=rate_from, kx=kx, kv=kv
+            kp,
+            kd,
+            dt,
+            max_force=max_force,
+            rate_from=rate_from,
+            kx=kx,
+            kv=kv,
+            physics=physics,
         )
-    return LinearController(weights, dt, max_force, rate_from)
+    return LinearController(weights, dt, max_force, rate_from, physics)
 
 
 def run_simulation(
@@ -785,12 +835,14 @@ class SimulationConfig:
     kd: float = setting(
         3.0, "pd controller's derivative gain, in newtons per radian per second"
     )
-    rate_from: str = setting(
-        "difference",
-        "where the pd controller gets rates of change: differences of "
-        "successive readings, or the true velocities, like perfect rate "
-        "sensors (the learned controller takes it from its weights file)",
-        choices=("difference", "velocity"),
+    rate_from: str | None = setting(
+        None,
+        "where the controller gets its numbers: difference (rates from "
+        "successive readings), velocity (the true velocities, like perfect rate "
+        "sensors) or kalman (a Kalman filter's estimates of all four, the "
+        "angle offset removed); default: difference for pd, or for learned "
+        "the weights file's",
+        choices=RATE_SOURCES,
     )
     d_smoothing: float = setting(
         0.0,
@@ -842,7 +894,7 @@ CONTROLLER_SETTINGS = {
     "kp": ("p", "pd"),
     "max_force": ("p", "pd", "learned"),
     "kd": ("pd",),
-    "rate_from": ("pd",),
+    "rate_from": ("pd", "learned"),
     "d_smoothing": ("pd",),
     "kx": ("pd",),
     "kv": ("pd",),
@@ -852,13 +904,19 @@ CONTROLLER_SETTINGS = {
 def check_controller_settings(config, given):
     """Raise ValueError if given (the settings asked for in the config file
     or on the command line) includes one config's controller doesn't use,
-    or if the learned controller has no weights file."""
+    if the learned controller has no weights file, or if smoothing is
+    asked for with the Kalman filter, which doesn't take it."""
     for name, controllers in CONTROLLER_SETTINGS.items():
         if name in given and config.controller not in controllers:
             needs = " or ".join(f"controller {c}" for c in controllers)
             raise ValueError(f"{option_name(name)} needs {needs}")
     if config.controller == "learned" and config.weights is None:
         raise ValueError("controller learned needs --weights")
+    if config.rate_from == "kalman" and config.d_smoothing:
+        raise ValueError(
+            f"--d-smoothing ({config.d_smoothing}) doesn't apply with --rate-from "
+            "kalman: the filter's estimates aren't smoothed; add --d-smoothing 0"
+        )
 
 
 def locate_weights(config, from_config_file):
@@ -879,8 +937,9 @@ def locate_weights(config, from_config_file):
     return dataclasses.replace(config, weights=str(path))
 
 
-def make_controller(config, dt):
-    """Build the controller config asks for. dt is the time step."""
+def make_controller(config, dt, physics=None):
+    """Build the controller config asks for. dt is the time step, and
+    physics the simulation's constants (needed for rate_from kalman)."""
     if config.controller == "p":
         return PController(config.kp, max_force=config.max_force)
     if config.controller == "pd":
@@ -889,15 +948,21 @@ def make_controller(config, dt):
             config.kd,
             dt=dt,
             max_force=config.max_force,
-            rate_from=config.rate_from,
+            rate_from=config.rate_from or "difference",
             smoothing=config.d_smoothing,
             kx=config.kx,
             kv=config.kv,
+            physics=physics,
         )
     if config.controller == "learned":
         weights, rate_from, kind = load_weights(config.weights)
         return controller_from_weights(
-            weights, dt=dt, max_force=config.max_force, rate_from=rate_from, kind=kind
+            weights,
+            dt=dt,
+            max_force=config.max_force,
+            rate_from=config.rate_from or rate_from,
+            kind=kind,
+            physics=physics,
         )
     return no_control
 
@@ -950,7 +1015,7 @@ def main():
         track_limit=config.track_limit,
         max_steps=config.max_steps,
     )
-    controller = ForceRecorder(make_controller(config, cartpole.tau))
+    controller = ForceRecorder(make_controller(config, cartpole.tau, cartpole.physics))
     sensor = Sensor(
         scale=config.angle_scale,
         offset=math.radians(config.angle_offset),

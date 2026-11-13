@@ -5,7 +5,7 @@ its rate of change, pole angle, its rate of change), and it pushes right
 with probability sigmoid(w · s), and otherwise left, always at the full
 10 N (standard CartPole's "bang-bang" control). By default the rates are
 estimated by differencing successive positions and angles, as
-cartpole.py's controllers do (see RateEstimator there), so the policy
+cartpole.py's controllers do (see make_rate_estimator there), so the policy
 learns from what angle and position sensors alone would give. Training
 adjusts the four weights w by REINFORCE, the simplest policy-gradient
 method:
@@ -83,16 +83,17 @@ import numpy as np
 
 from cartpole import (
     CONTINUOUS,
+    RATE_SOURCES,
     THREE_ACTION,
     TWO_ACTION,
     CartPole,
     ForceRecorder,
-    RateEstimator,
     Sensor,
     control_quality,
     controller_from_weights,
     count_reversals,
     load_weights,
+    make_rate_estimator,
     print_quality,
     print_summary,
     run_simulation,
@@ -142,9 +143,10 @@ class TrainConfig:
     )
     rate_from: str = setting(
         "difference",
-        "where the policy's rates of change come from: differences of "
-        "successive positions and angles, or the true velocities",
-        choices=("difference", "velocity"),
+        "where the policy's inputs come from: difference (rates from successive "
+        "positions and angles), velocity (the true velocities) or kalman (a "
+        "Kalman filter's estimates of all four, the angle offset removed)",
+        choices=RATE_SOURCES,
     )
     normalize_inputs: bool = setting(
         False,
@@ -514,7 +516,7 @@ def play_episode(
 ):
     """Play one episode, sampling actions from policy.
 
-    The policy's inputs come from the state through a RateEstimator, so
+    The policy's inputs come from the state through make_rate_estimator, so
     with rate_from "difference" it sees the rates the way cartpole.py's
     controllers estimate them. If scales is given, each input is divided
     by its scale. Each step's reward is reduced by costs. With a sensor,
@@ -526,7 +528,7 @@ def play_episode(
     it (the probability of pushing right, of each action, or the mean
     force), and the reward that followed.
     """
-    rates = RateEstimator(cartpole.tau, rate_from)
+    rates = make_rate_estimator(cartpole.tau, rate_from, physics=cartpole.physics)
     inputs, actions, probs, rewards = [], [], [], []
     state = cartpole.reset(seed=seed)
     terminated = truncated = False
@@ -540,6 +542,7 @@ def play_episode(
         actions.append(action)
         probs.append(p)
         force = policy.force(action)
+        rates.applied(force)
         state, reward, terminated, truncated = cartpole.step(force)
         rewards.append(costs.reward(reward, state, force, cartpole))
     return np.array(inputs), np.array(actions), np.array(probs), rewards
@@ -613,7 +616,9 @@ def evaluate(
     lengths, returns, all_states, all_forces, reversals = [], [], [], [], 0
     for i in range(episodes):
         controller = ForceRecorder(
-            controller_from_weights(weights, cartpole.tau, FORCE, rate_from, kind)
+            controller_from_weights(
+                weights, cartpole.tau, FORCE, rate_from, kind, cartpole.physics
+            )
         )
         states, _ = run_simulation(
             cartpole,
@@ -1222,7 +1227,7 @@ def main():
     if not args.no_window:
         cartpole = make_cartpole(config, render_mode="human", slow=args.slow)
         controller = controller_from_weights(
-            weights, cartpole.tau, FORCE, rate_from, kind
+            weights, cartpole.tau, FORCE, rate_from, kind, cartpole.physics
         )
         states, _ = run_simulation(cartpole, controller, make_sensor(config, None))
         cartpole.close()

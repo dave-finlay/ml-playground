@@ -483,3 +483,22 @@ def test_training_limits_set_the_cartpole():
     standard = make_cartpole(TrainConfig())
     assert (standard.track_limit, standard.max_steps) == (2.4, 500)
     standard.close()
+
+
+def test_training_on_kalman_estimates(capsys):
+    config = TrainConfig(
+        seed=3,
+        batches=40,
+        normalize_inputs=True,
+        learning_rate=1.0,
+        actions="continuous",
+        rate_from="kalman",
+        angle_noise=1.0,
+        position_noise=0.01,
+        checkpoint_every=0,
+    )
+    result = training_result(config, capsys)
+    mean_lengths = [row[2] for row in result.curve]
+    # It starts more slowly than on differenced rates: the filter takes a
+    # moment to settle at the start of each episode.
+    assert np.mean(mean_lengths[-10:]) > 2 * np.mean(mean_lengths[:10])

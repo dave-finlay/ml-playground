@@ -9,6 +9,7 @@ import pytest
 
 import cartpole
 from cartpole import (
+    CartPole,
     Differencer,
     LinearController,
     PDController,
@@ -23,9 +24,12 @@ from cartpole import (
     load_weights,
     locate_weights,
     make_controller,
+    make_rate_estimator,
+    run_simulation,
     save_weights,
 )
 from config import load_config, load_config_file
+from kalman import KalmanEstimator
 
 DT = 0.02
 CONFIGS_DIR = Path(__file__).parent.parent / "configs" / "cartpole"
@@ -148,7 +152,7 @@ def test_weights_file_names_its_inputs(tmp_path):
         ("p", {"kd": 3.0}, "--kd needs controller pd"),
         ("none", {"max_force": 5.0}, "--max-force needs controller p or"),
         ("pd", {"weights": "w.json"}, "--weights needs controller learned"),
-        ("learned", {"rate_from": "velocity"}, "--rate-from needs controller pd"),
+        ("p", {"rate_from": "velocity"}, "--rate-from needs controller pd or"),
         ("learned", {}, "needs --weights"),
     ],
 )
@@ -329,3 +333,64 @@ def test_position_noise_leaves_the_angle_noise_unchanged():
 def test_sensor_scale_and_offset_apply_to_the_angle():
     x, _, theta, _ = Sensor(scale=2.0, offset=0.01).read(STATE)
     assert x == STATE[0] and theta == pytest.approx(2 * 0.05 + 0.01)
+
+
+def test_kalman_rate_estimator_needs_physics_and_no_smoothing():
+    cartpole = CartPole.make()
+    assert isinstance(
+        make_rate_estimator(DT, "kalman", physics=cartpole.physics), KalmanEstimator
+    )
+    with pytest.raises(ValueError, match="physics"):
+        make_rate_estimator(DT, "kalman")
+    with pytest.raises(ValueError, match="smoothing"):
+        make_rate_estimator(DT, "kalman", smoothing=0.5, physics=cartpole.physics)
+    with pytest.raises(ValueError, match="unknown"):
+        make_rate_estimator(DT, "guess")
+    cartpole.close()
+
+
+def test_controllers_tell_the_filter_the_force_they_applied():
+    """A Kalman-fed controller reports each (capped) force with applied(),
+    so its filter predicts with the force the cart actually got."""
+    cartpole = CartPole.make()
+    controller = PDController(
+        20, 3, DT, max_force=10, rate_from="kalman", physics=cartpole.physics
+    )
+    controller((0.0, 0.0, 1.0, 0.0))  # asks for 20 N, gets 10
+    assert controller._rates._applied == 10
+    cartpole.close()
+
+
+@pytest.mark.parametrize("rate_from", ["difference", "kalman"])
+def test_pd_balances_with_noisy_sensors(rate_from):
+    cartpole = CartPole.make(track_limit=5.0, max_steps=500)
+    controller = PDController(
+        20, 3, cartpole.tau, kx=0.5, kv=1, rate_from=rate_from, physics=cartpole.physics
+    )
+    sensor = Sensor(noise_std=math.radians(1), position_noise_std=0.01, seed=1)
+    states, _ = run_simulation(
+        cartpole, controller, sensor, seed=1, start_pause=0, end_pause=0
+    )
+    cartpole.close()
+    assert len(states) - 1 == 500
+
+
+def test_learned_weights_can_run_with_another_rate_source(tmp_path):
+    path = tmp_path / "weights.json"
+    save_weights(path, [0.5, 1.0, 20.0, 3.0], "difference", kind="continuous")
+    config = SimulationConfig(
+        controller="learned", weights=str(path), rate_from="kalman"
+    )
+    check_controller_settings(config, {"controller": "learned", "rate_from": "kalman"})
+    cartpole = CartPole.make()
+    controller = make_controller(config, cartpole.tau, cartpole.physics)
+    assert isinstance(controller._rates, KalmanEstimator)
+    cartpole.close()
+
+
+def test_smoothing_with_the_kalman_filter_is_a_clean_error():
+    config = SimulationConfig(controller="pd", rate_from="kalman", d_smoothing=0.1)
+    with pytest.raises(ValueError, match="--d-smoothing 0"):
+        check_controller_settings(
+            config, {"controller": "pd", "rate_from": "kalman", "d_smoothing": 0.1}
+        )

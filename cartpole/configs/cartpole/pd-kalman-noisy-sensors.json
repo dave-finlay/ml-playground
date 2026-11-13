@@ -1,0 +1,12 @@
+{
+  "description": "The gentle PD gains acting on a Kalman filter's estimates, with noisy sensors: 1 degree of angle noise, a 1 degree offset and 1 cm of position noise",
+  "controller": "pd",
+  "kp": 20.0,
+  "kd": 3.0,
+  "kx": 0.5,
+  "kv": 1.0,
+  "rate_from": "kalman",
+  "angle_noise": 1.0,
+  "angle_offset": 1.0,
+  "position_noise": 0.01
+}
