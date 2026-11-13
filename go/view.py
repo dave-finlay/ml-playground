@@ -7,12 +7,15 @@ territory is marked with small squares of its colour and the caption
 gives the score.
 
 While a game plays: space pauses and resumes, and closing the window
-(or Escape) stops it.
+(or Escape) stops it. When it's a person's turn (ask_move), they click
+a point to play there, or press P to pass.
 """
 
 import pygame
 
 from game import BLACK, COLUMNS, WHITE
+
+COLOUR_NAMES = {BLACK: "Black", WHITE: "White"}
 
 BACKGROUND = (219, 178, 98)
 LINE = (40, 30, 20)
@@ -100,6 +103,10 @@ def draw_board(surface, game, cell, last_move=None, caption="", final=False):
         surface.blit(text, (12, pixels + 6 + 24 * i))
 
 
+class QuitGame(Exception):
+    """The window was closed (or Escape pressed) while waiting for a move."""
+
+
 class BoardView:
     """A window showing a game. Call show() after each move, then
     finish() at the end; it handles the window's events meanwhile."""
@@ -112,6 +119,8 @@ class BoardView:
         pygame.display.set_caption(title)
         self.clock = pygame.time.Clock()
         self.closed = False
+        self.size = size
+        self.margin, _ = board_geometry(size, self.cell)
 
     def show(self, game, last_move=None, caption="", seconds=0.0, final=False):
         """Draw the position, then keep the window responsive for seconds
@@ -130,6 +139,61 @@ class BoardView:
                     paused = not paused
             waited += self.clock.tick(60) / 1000
         return not self.closed
+
+    def point_at(self, position):
+        """The point nearest the pixel position (x, y), or None if it's not
+        close enough to any."""
+        x, y = position
+        column = round((x - self.margin) / self.cell)
+        row = round((y - self.margin) / self.cell)
+        if not (0 <= row < self.size and 0 <= column < self.size):
+            return None
+        centre = (self.margin + column * self.cell, self.margin + row * self.cell)
+        if (x - centre[0]) ** 2 + (y - centre[1]) ** 2 > (0.48 * self.cell) ** 2:
+            return None
+        return row * self.size + column
+
+    def ask_move(self, game, last_move=None):
+        """Wait for the person to move for the player to move: a click on a
+        point plays there, P passes. An illegal click says why and waits
+        for another. Raises QuitGame if the window is closed (or Escape
+        pressed) instead."""
+        if self.closed:
+            raise QuitGame
+        colour = COLOUR_NAMES[game.to_play]
+        prompt = (
+            f"{colour} (you) to play: click a point, or P to pass\n"
+            "Capture dead stones before passing: the board scores as it stands"
+        )
+        last_move = (
+            last_move
+            if last_move is not None
+            else (game.moves[-1] if game.moves else None)
+        )
+        draw_board(self.screen, game, self.cell, last_move, prompt)
+        pygame.display.flip()
+        while True:
+            event = pygame.event.wait()
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                self.closed = True
+                raise QuitGame
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_p:
+                return game.pass_move
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                point = self.point_at(event.pos)
+                if point is None:
+                    continue
+                reason = game.why_illegal(point)
+                if reason is None:
+                    return point
+                retry = (
+                    f"{game.name(point)} isn't allowed: {reason}\n"
+                    f"{colour} (you) to play: click a point, or P to pass"
+                )
+                draw_board(self.screen, game, self.cell, last_move, retry)
+                pygame.display.flip()
 
     def finish(self, game, caption):
         """Show the final position with territory until the window is

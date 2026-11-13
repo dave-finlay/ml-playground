@@ -6,21 +6,27 @@ Run from the repo root:
     uv run python go/play.py --size 7 --games 500
     uv run python go/play.py --komi 2.5 --seed 1
     uv run python go/play.py --watch --seed 3     # one game, move by move
-    uv run python go/play.py --window --black eye-aware --white eye-aware
     uv run python go/play.py --black eye-aware --white eye-aware
+    uv run python go/play.py --window --black eye-aware --white eye-aware
+    uv run python go/play.py --window --black human --white eye-aware
 
-Players: random (uniform over legal moves, passing included) and
+Players: random (uniform over legal moves, passing included),
 eye-aware (random, but never filling its own eyes, passing only when
-nothing else is left).
+nothing else is left) and human (you, clicking in the window: needs
+--window).
 """
 
 import argparse
+import contextlib
 import statistics
 
 from game import BLACK, EMPTY, WHITE, Game
-from players import EyeAwareRandomPlayer, RandomPlayer
+from players import EyeAwareRandomPlayer, HumanPlayer, RandomPlayer
 
+# Computer players, by name. "human" (you, clicking in the window) is
+# also a choice for --black and --white, with --window.
 PLAYERS = {"random": RandomPlayer, "eye-aware": EyeAwareRandomPlayer}
+HUMAN = "human"
 
 
 def describe_move(game, move, mover, captured):
@@ -63,14 +69,29 @@ def final_caption(game):
     )
 
 
-def watch_in_window(game, black, white, delay):
-    """Play game in a pygame window, pausing delay seconds after each
-    move, then show the result with territory until a key is pressed."""
-    from view import BoardView  # only needed with a window
+def make_player(name, seed, view=None):
+    """The player called name, seeded with seed; a human player asks
+    through view (a BoardView)."""
+    return HumanPlayer(view) if name == HUMAN else PLAYERS[name](seed)
+
+
+def watch_in_window(game, black_name, white_name, seed, delay):
+    """Play game in a pygame window between the players named (either may
+    be "human", clicking in the window), pausing delay seconds after each
+    computer move, then show the result with territory until a key is
+    pressed."""
+    from view import BoardView, QuitGame  # only needed with a window
 
     view = BoardView(game.size)
-    names = {BLACK: "Black", WHITE: "White"}
-    view.show(game, caption=f"{names[BLACK]} to play", seconds=delay)
+    black = make_player(black_name, None if seed is None else seed, view)
+    white = make_player(white_name, None if seed is None else seed + 1, view)
+    humans = {
+        colour
+        for colour, name in ((BLACK, black_name), (WHITE, white_name))
+        if name == HUMAN
+    }
+    if BLACK not in humans:
+        view.show(game, caption="Black to play", seconds=delay)
 
     def show_move(game, move, mover, captured):
         line = describe_move(game, move, mover, captured)
@@ -78,9 +99,11 @@ def watch_in_window(game, black, white, delay):
             f"Captured so far: Black {game.captures[BLACK]}, "
             f"White {game.captures[WHITE]}"
         )
-        return view.show(game, move, f"{line}\n{tally}", seconds=delay)
+        pause = 0.0 if mover in humans else delay
+        return view.show(game, move, f"{line}\n{tally}", seconds=pause)
 
-    play_game(game, black, white, after_move=show_move)
+    with contextlib.suppress(QuitGame):  # the window closed on your turn
+        play_game(game, black, white, after_move=show_move)
     if game.over:
         area = game.area()
         caption = (
@@ -160,13 +183,13 @@ def parse_args():
     )
     parser.add_argument(
         "--black",
-        choices=PLAYERS,
+        choices=[*PLAYERS, HUMAN],
         default="random",
         help="Black's player (default: random)",
     )
     parser.add_argument(
         "--white",
-        choices=PLAYERS,
+        choices=[*PLAYERS, HUMAN],
         default="random",
         help="White's player (default: random)",
     )
@@ -189,21 +212,24 @@ def parse_args():
         default=0.5,
         help="with --window, seconds between moves (default: 0.5)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if HUMAN in (args.black, args.white) and not args.window:
+        parser.error("a human player needs --window (you play by clicking)")
+    return args
 
 
 def main():
     args = parse_args()
     seed = args.seed
-    black = PLAYERS[args.black](None if seed is None else seed)
-    white = PLAYERS[args.white](None if seed is None else seed + 1)
 
     def new_game():
         return Game(args.size, komi=args.komi, max_moves=args.max_moves)
 
     if args.window:
-        watch_in_window(new_game(), black, white, args.delay)
+        watch_in_window(new_game(), args.black, args.white, seed, args.delay)
         return
+    black = make_player(args.black, None if seed is None else seed)
+    white = make_player(args.white, None if seed is None else seed + 1)
     if args.watch:
         game = play_game(new_game(), black, white, after_move=print_move)
         print(final_caption(game))

@@ -29,7 +29,7 @@ which the tests use.
 
 ## players.py and play.py
 
-Two players so far:
+Three players so far:
 
 - `random`: uniform over all legal moves, passing included.
 - `eye-aware`: random, but never fills one of its own eyes, and passes
@@ -38,6 +38,11 @@ Two players so far:
   on the edge); otherwise it's a false eye. This is the standard random
   player of Go programs, and the playout policy Monte Carlo tree search
   uses.
+- `human`: you, in the window (needs `--window`): click a point to play
+  there, or press P to pass. An illegal click says why (occupied,
+  suicide, or repeating a position) and waits for another. The board
+  scores as it stands, with no removal of dead stones, so capture them
+  before passing.
 
 `play.py` plays many games between two players and summarizes them, or
 shows one game move by move:
@@ -47,12 +52,14 @@ uv run python go/play.py                                    # 1000 random games,
 uv run python go/play.py --size 7 --black eye-aware --white eye-aware
 uv run python go/play.py --watch --seed 3                   # one game, move by move
 uv run python go/play.py --window --black eye-aware --white eye-aware
+uv run python go/play.py --window --black human --white eye-aware   # you play Black
+uv run python go/play.py --window --black random --white human      # you play White
 ```
 
 `--window` plays one game in a pygame window (`view.py`): the board with
 its coordinates, a red dot on the latest stone, and the move and
-captures so far below. `--delay` sets the seconds between moves
-(default 0.5); space pauses and resumes, and Escape or closing the
+captures so far below. `--delay` sets the seconds after each computer
+move (default 0.5); space pauses and resumes, and Escape or closing the
 window stops the game. At the end each side's territory is marked with
 small squares of its colour, and the score stays up until a key is
 pressed.

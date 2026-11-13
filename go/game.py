@@ -133,6 +133,14 @@ class Game:
             return None, "repeats an earlier position (superko)"
         return board, captured
 
+    def why_illegal(self, point):
+        """Why the player to move may not play at point (like "occupied"
+        or "suicide"), or None if they may."""
+        if self.over:
+            return "the game is over"
+        board, reason = self._result_of(point)
+        return None if board is not None else reason
+
     def is_legal(self, point):
         """Whether the player to move may play at point (PASS is always
         legal while the game goes on)."""

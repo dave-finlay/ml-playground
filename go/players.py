@@ -60,3 +60,15 @@ class EyeAwareRandomPlayer:
             if m != game.pass_move and not is_eye(game, m, game.to_play)
         ]
         return self._random.choice(moves) if moves else game.pass_move
+
+
+class HumanPlayer:
+    """Asks a person for the move: view (a BoardView, see view.py) shows
+    the board and waits for a click on a point, or P to pass. Raises
+    view.QuitGame if the window is closed instead."""
+
+    def __init__(self, view):
+        self.view = view
+
+    def __call__(self, game):
+        return self.view.ask_move(game)
