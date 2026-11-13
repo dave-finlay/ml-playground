@@ -9,11 +9,13 @@ Run from the repo root:
     uv run python go/play.py --black eye-aware --white eye-aware
     uv run python go/play.py --window --black eye-aware --white eye-aware
     uv run python go/play.py --window --black human --white eye-aware
+    uv run python go/play.py --window --black human --white learned \\
+        --model go/runs/first.pt
 
 Players: random (uniform over legal moves, passing included),
 eye-aware (random, but never filling its own eyes, passing only when
-nothing else is left) and human (you, clicking in the window: needs
---window).
+nothing else is left), human (you, clicking in the window: needs
+--window) and learned (a network trained by learn.py: needs --model).
 """
 
 import argparse
@@ -23,10 +25,12 @@ import statistics
 from game import BLACK, EMPTY, WHITE, Game
 from players import EyeAwareRandomPlayer, HumanPlayer, RandomPlayer
 
-# Computer players, by name. "human" (you, clicking in the window) is
-# also a choice for --black and --white, with --window.
+# Computer players, by name. "human" (you, clicking in the window) and
+# "learned" (a network trained by learn.py, from --model) are also
+# choices for --black and --white.
 PLAYERS = {"random": RandomPlayer, "eye-aware": EyeAwareRandomPlayer}
 HUMAN = "human"
+LEARNED = "learned"
 
 
 def describe_move(game, move, mover, captured):
@@ -69,13 +73,20 @@ def final_caption(game):
     )
 
 
-def make_player(name, seed, view=None):
+def make_player(name, seed, view=None, model=None):
     """The player called name, seeded with seed; a human player asks
-    through view (a BoardView)."""
-    return HumanPlayer(view) if name == HUMAN else PLAYERS[name](seed)
+    through view (a BoardView), and a learned one plays the network saved
+    at model, always taking its likeliest move."""
+    if name == HUMAN:
+        return HumanPlayer(view)
+    if name == LEARNED:
+        from policy import NetworkPlayer, load_network  # needs PyTorch
+
+        return NetworkPlayer(load_network(model))
+    return PLAYERS[name](seed)
 
 
-def watch_in_window(game, black_name, white_name, seed, delay):
+def watch_in_window(game, black_name, white_name, seed, delay, model=None):
     """Play game in a pygame window between the players named (either may
     be "human", clicking in the window), pausing delay seconds after each
     computer move, then show the result with territory until a key is
@@ -83,8 +94,8 @@ def watch_in_window(game, black_name, white_name, seed, delay):
     from view import BoardView, QuitGame  # only needed with a window
 
     view = BoardView(game.size)
-    black = make_player(black_name, None if seed is None else seed, view)
-    white = make_player(white_name, None if seed is None else seed + 1, view)
+    black = make_player(black_name, None if seed is None else seed, view, model)
+    white = make_player(white_name, None if seed is None else seed + 1, view, model)
     humans = {
         colour
         for colour, name in ((BLACK, black_name), (WHITE, white_name))
@@ -183,13 +194,13 @@ def parse_args():
     )
     parser.add_argument(
         "--black",
-        choices=[*PLAYERS, HUMAN],
+        choices=[*PLAYERS, HUMAN, LEARNED],
         default="random",
         help="Black's player (default: random)",
     )
     parser.add_argument(
         "--white",
-        choices=[*PLAYERS, HUMAN],
+        choices=[*PLAYERS, HUMAN, LEARNED],
         default="random",
         help="White's player (default: random)",
     )
@@ -212,7 +223,16 @@ def parse_args():
         default=0.5,
         help="with --window, seconds between moves (default: 0.5)",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="the network file for a learned player (saved by learn.py)",
+    )
     args = parser.parse_args()
+    if LEARNED in (args.black, args.white) and not args.model:
+        parser.error("a learned player needs --model")
+    if args.model and LEARNED not in (args.black, args.white):
+        parser.error("--model needs a learned player")
     if HUMAN in (args.black, args.white) and not args.window:
         parser.error("a human player needs --window (you play by clicking)")
     return args
@@ -226,10 +246,14 @@ def main():
         return Game(args.size, komi=args.komi, max_moves=args.max_moves)
 
     if args.window:
-        watch_in_window(new_game(), args.black, args.white, seed, args.delay)
+        watch_in_window(
+            new_game(), args.black, args.white, seed, args.delay, args.model
+        )
         return
-    black = make_player(args.black, None if seed is None else seed)
-    white = make_player(args.white, None if seed is None else seed + 1)
+    black = make_player(args.black, None if seed is None else seed, model=args.model)
+    white = make_player(
+        args.white, None if seed is None else seed + 1, model=args.model
+    )
     if args.watch:
         game = play_game(new_game(), black, white, after_move=print_move)
         print(final_caption(game))

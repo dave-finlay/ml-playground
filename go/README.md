@@ -1,8 +1,10 @@
 # go
 
 Learning to play Go on a small board (5 × 5 or 7 × 7), step by step:
-random players first, then a learned player against random, then
-learned against learned. The rules are written from scratch.
+random players first, then a learned player against random (done: a
+small network trained with REINFORCE beats the random players about 99%
+of the time), then learned against learned. The rules are written from
+scratch.
 
 ## game.py: the rules
 
@@ -90,11 +92,57 @@ pressed.
 - Not filling your own eyes is already a big skill: eye-aware beats
   plain random 88% of the time.
 
+## learn.py: a learned player
+
+`policy.py` holds a small convolutional network (PyTorch). It sees the
+board from the point of view of the player to move, as three layers
+(that player's stones, the opponent's, the empty points), so one
+network plays either colour. Three 3 × 3 convolutions of 32 channels
+each look at every point and its neighbours (stacked, they see further);
+a 1 × 1 convolution then scores each point, and the last layer's
+average scores passing. Illegal moves are masked out before the softmax.
+
+`learn.py` trains it with REINFORCE against a fixed opponent (by default
+the eye-aware player), alternating colours. Each batch of 64 games, the
+network samples its moves from its own probabilities; the reward is the
+result (+1 win, −1 loss, 0 draw), and every one of its moves in a game
+gets the game's result less the batch's average result as its
+advantage. One Adam step (learning rate 0.001) then makes moves from
+better-than-average games more likely. Every 20 batches it's tested
+without sampling (its likeliest move), on 100 games as each colour, and
+the best version is kept and saved with `--save`. `play.py` plays a
+saved network as the `learned` player with `--model`:
+
+```sh
+uv run python go/learn.py --batches 200 --seed 1 --save go/runs/eye-aware-5x5-seed1.pt
+uv run python go/play.py --black learned --white eye-aware --model go/runs/eye-aware-5x5-seed1.pt
+uv run python go/play.py --window --black human --white learned --model go/runs/eye-aware-5x5-seed1.pt
+```
+
+Results on 5 × 5 (seed 1, komi 0):
+
+- Untrained (always its likeliest move) it loses almost every game. After
+  40 batches (2560 games, about 17 s) it wins about 90% against
+  eye-aware as either colour; the best version (batch 180 of 200, about
+  70 s) won 100% as Black and 98% as White in its test.
+- On 500 fresh games: against eye-aware it wins 99.0% as Black and
+  98.4% as White; against uniform random 100% and 99.6%.
+- It opens in the centre (C3) as Black, the known best first move on
+  5 × 5, and takes the centre as White when it's free.
+- It hasn't learned to tidy up: it often passes with dead opponent
+  stones still on the board, which count for the opponent under area
+  scoring. Against random players that costs it nothing.
+- Against itself (always its likeliest move) it plays the same game
+  every time; Black wins by 12.
+
 ## Tests
 
 `uv run pytest` from the repo root runs them, with the other
 experiments': captures, suicide, ko and superko, passing and the move
-limit, scoring and komi, eyes, and random games finishing legally.
+limit, scoring and komi, eyes, random games finishing legally, the
+window (with synthetic clicks), and the network: encoding from the
+mover's point of view, legal masks, only legal moves played, and a
+REINFORCE update making moves from won games more likely.
 
 Module names here are distinct from `cartpole/`'s (both directories are
 on the tests' Python path, so a second `train.py` would collide).
