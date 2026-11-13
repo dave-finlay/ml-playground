@@ -722,6 +722,56 @@ seeds; survival, RMS angle and cart position, mean force):
   would let RL find the best gains for the noisy problem directly,
   without modelling the noise.
 
+## kalman.py: estimating the state
+
+Controllers estimate the two rates by differencing successive readings,
+which divides each reading's noise by 0.02 s: 1° of angle noise becomes
+about 70°/s of angle-rate noise. `kalman.py` is a Kalman filter that
+estimates the state from the same two readings, cart position and pole
+angle, using the linear model in `model.py` (the one `lqr.py` uses). Its
+state is (x, x rate, angle, angle rate, angle sensor offset). Each step
+it predicts the state from its last estimate and the force applied, then
+corrects toward the readings by a gain that weighs how uncertain the
+prediction is against how noisy the readings are. The velocities are
+never measured, but the model ties them to how the positions change.
+The offset isn't measured either, but it shows: if the pole really
+leaned by the offset, the cart would have to keep accelerating to hold
+it, and the position readings show whether it does (the observability
+matrix has full rank).
+
+The filter isn't told the actual noise. Its noise settings are rough
+guesses (angle 2°, position 2 cm; unmodelled accelerations 0.5 m/s² and
+0.5 rad/s²; a slight drift for the offset), and its gain depends only on
+their ratios, so what's really chosen is how far to trust the readings
+against the model.
+
+`cartpole.py --compare-estimates` runs the filter alongside any run,
+without it controlling anything, and compares its estimates with the
+truth:
+
+```sh
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noisy-sensors.json --compare-estimates
+```
+
+With the PD controller and noisy sensors (1° angle noise, a 1° offset,
+1 cm position noise; 10 seeds; RMS error after the first second):
+
+| | x | x rate | angle | angle rate |
+|---|---|---|---|---|
+| readings, differenced | 1.00 cm | 72 cm/s | 1.41° | 68°/s |
+| Kalman filter | 0.32 cm | 0.9 cm/s | 0.41° | 1.6°/s |
+| Kalman filter, no offset state | 0.32 cm | 1.0 cm/s | 1.71° | 6.3°/s |
+
+The offset estimate after 20 s averaged 0.99° (0.94° to 1.05°) against
+the true 1°, within about 0.1° after 2 s. Scaling the guessed sensor
+noise or the guessed model error from a tenth to ten times the defaults
+(a hundredfold range in their ratio) kept the angle-rate error between
+1.6 and 3.7°/s and the cart-velocity error between 0.2 and 5.2 cm/s,
+still at least 18 times better than differencing; scaling both alike
+changed nothing. Trusting the model more did better here because the
+simulation is the model near upright; a real cart's model would be
+less exact.
+
 ## Tests
 
 `tests/` checks the logic that would fail silently rather than crash

@@ -40,7 +40,6 @@ Settings come from built-in defaults, overridden by a JSON config file
 """
 
 import argparse
-import collections
 import dataclasses
 import itertools
 import json
@@ -57,10 +56,8 @@ from config import (
     option_name,
     setting,
 )
-
-Physics = collections.namedtuple(
-    "Physics", "gravity cart_mass pole_mass half_length tau"
-)
+from kalman import KalmanEstimator
+from model import Physics
 
 
 def clamp(value, limit):
@@ -686,6 +683,59 @@ def print_quality(quality):
     )
 
 
+def print_estimate_comparison(states, readings, forces, cartpole, true_offset):
+    """Compare two ways of estimating the state from an episode's readings
+    with the true states: the readings themselves with rates differenced
+    from them (what controllers use by default), and a Kalman filter
+    (kalman.py) watching alongside, which doesn't affect the control.
+
+    Prints each one's RMS error after the first second (once the filter
+    has settled), and the filter's estimate of the angle sensor offset
+    against true_offset (radians) as it goes.
+    """
+    rates = RateEstimator(cartpole.tau, "difference")
+    differenced = [rates.update(reading) for reading in readings]
+    filter_ = KalmanEstimator(cartpole.physics)
+    offsets = []
+    filtered = [filter_.update(readings[0])]
+    offsets.append(filter_.offset)
+    for reading, force in zip(readings[1:], forces, strict=True):
+        filtered.append(filter_.update(reading, force))
+        offsets.append(filter_.offset)
+    settle = round(1.0 / cartpole.tau)
+
+    def rms(estimates, i, scale):
+        errors = [e[i] - s[i] for e, s in zip(estimates, states, strict=True)][settle:]
+        return scale * math.sqrt(sum(e * e for e in errors) / max(len(errors), 1))
+
+    print()
+    print("Estimating the state from the readings (RMS error after the first second):")
+    print(
+        f"  {'':24}  {'x (cm)':>7}  {'x rate (cm/s)':>13}  {'angle':>7}  "
+        f"{'angle rate':>11}"
+    )
+    for name, estimates in (
+        ("readings, differenced", differenced),
+        ("Kalman filter", filtered),
+    ):
+        print(
+            f"  {name:24}  {rms(estimates, 0, 100):7.2f}  "
+            f"{rms(estimates, 1, 100):13.1f}  "
+            f"{rms(estimates, 2, 180 / math.pi):6.2f}°  "
+            f"{rms(estimates, 3, 180 / math.pi):8.1f}°/s"
+        )
+    steps = [round(t / cartpole.tau) for t in (0.5, 1, 2, 5, 10, 20)]
+    progress = ", ".join(
+        f"{n * cartpole.tau:g} s {math.degrees(offsets[n]):.2f}°"
+        for n in steps
+        if n < len(offsets)
+    )
+    print(
+        f"  Angle sensor offset: true {math.degrees(true_offset):.2f}°; the "
+        f"filter's estimate at {progress}"
+    )
+
+
 def print_summary(states, tau, angle_limit, track_limit):
     steps = len(states) - 1
     t = steps * tau
@@ -871,6 +921,12 @@ def parse_args():
         action="store_true",
         help="don't open a window, just print the trace",
     )
+    parser.add_argument(
+        "--compare-estimates",
+        action="store_true",
+        help="also run a Kalman filter alongside (it doesn't control) and "
+        "compare its state estimates with the differenced readings",
+    )
     add_setting_options(parser, SimulationConfig)
     args = parser.parse_args()
     try:
@@ -907,6 +963,14 @@ def main():
     print_trace(states, readings, cartpole.tau, cartpole.normal_angle_limit)
     print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
     print_quality(control_quality(states, controller.forces, cartpole.tau))
+    if args.compare_estimates:
+        print_estimate_comparison(
+            states,
+            readings,
+            controller.forces,
+            cartpole,
+            math.radians(config.angle_offset),
+        )
 
 
 if __name__ == "__main__":

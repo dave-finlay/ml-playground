@@ -52,6 +52,7 @@ import numpy as np
 
 from cartpole import CartPole
 from config import add_setting_options, given_values, load_config, make_config, setting
+from model import discretize, linearize
 from train import GAIN_NAMES, PD_GAINS, TrainConfig
 
 MAX_FORCE = 10.0  # newtons, the cap the cost is relative to
@@ -84,41 +85,6 @@ class LQRConfig:
             )
         if not 0 < self.gamma <= 1:
             raise ValueError("gamma should be more than 0 and at most 1")
-
-
-def linearize(physics):
-    """Return (A, B) for the cart and pole linearized about upright, in
-    continuous time: d/dt state = A state + B force, with state (x,
-    x_rate, angle, angle_rate).
-
-    From Gymnasium's equations with small angles (sin = angle, cos = 1)
-    and the angle rate's square dropped:
-        angle_accel = (g angle - force / M) / (l (4/3 - m / M))
-        x_accel = force / M - (m l / M) angle_accel
-    where M is the total mass, m the pole's mass and l its half-length.
-    """
-    total = physics.cart_mass + physics.pole_mass
-    lever = physics.pole_mass * physics.half_length / total
-    denominator = physics.half_length * (4 / 3 - physics.pole_mass / total)
-    angle_from_angle = physics.gravity / denominator
-    angle_from_force = -1 / (total * denominator)
-    a = np.array(
-        [
-            [0, 1, 0, 0],
-            [0, 0, -lever * angle_from_angle, 0],
-            [0, 0, 0, 1],
-            [0, 0, angle_from_angle, 0],
-        ]
-    )
-    b = np.array([[0], [1 / total - lever * angle_from_force], [0], [angle_from_force]])
-    return a, b
-
-
-def discretize(a, b, tau):
-    """The continuous model stepped by explicit Euler, as Gymnasium steps
-    it: state' = (I + tau A) state + tau B force. Exact for the linear
-    model, not an approximation of it."""
-    return np.eye(len(a)) + tau * a, tau * b
 
 
 def cost_matrices(config, angle_limit, track_limit):

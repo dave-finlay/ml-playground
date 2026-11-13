@@ -11,12 +11,11 @@ from lqr import (
     LQRConfig,
     closed_loop_modes,
     cost_matrices,
-    discretize,
-    linearize,
     optimal_gains,
     save_simulation_config,
     solve_lqr,
 )
+from model import discretize, linearize
 
 
 @pytest.fixture(scope="module")
