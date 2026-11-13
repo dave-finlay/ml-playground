@@ -1,0 +1,8 @@
+{
+  "description": "LQR gains for angle cost 0.3, position cost 0.2, force cost 0.3",
+  "controller": "pd",
+  "kp": 59.6436,
+  "kd": 11.3318,
+  "kx": 1.7826,
+  "kv": 3.4794
+}

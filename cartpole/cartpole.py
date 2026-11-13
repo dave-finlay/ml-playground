@@ -39,6 +39,7 @@ Settings come from built-in defaults, overridden by a JSON config file
 """
 
 import argparse
+import collections
 import dataclasses
 import itertools
 import json
@@ -54,6 +55,10 @@ from config import (
     make_config,
     option_name,
     setting,
+)
+
+Physics = collections.namedtuple(
+    "Physics", "gravity cart_mass pole_mass half_length tau"
 )
 
 
@@ -133,6 +138,26 @@ class CartPole:
     def max_steps(self):
         """Number of steps after which an episode ends regardless."""
         return self._env.spec.max_episode_steps
+
+    @property
+    def physics(self):
+        """The constants of the simulation, read from Gymnasium: gravity
+        (m/s^2), cart and pole masses (kg), the pole's half-length (m;
+        Gymnasium calls it length, but the pole is twice as long), and the
+        time step tau (s). Gymnasium steps with explicit Euler; anything
+        else would make a linear model of it wrong, so that's checked."""
+        physics = self._env.unwrapped
+        if physics.kinematics_integrator != "euler":
+            raise ValueError(
+                f"expected Euler steps, not {physics.kinematics_integrator!r}"
+            )
+        return Physics(
+            gravity=physics.gravity,
+            cart_mass=physics.masscart,
+            pole_mass=physics.masspole,
+            half_length=physics.length,
+            tau=physics.tau,
+        )
 
     @property
     def normal_angle_limit(self):

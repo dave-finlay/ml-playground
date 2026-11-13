@@ -81,6 +81,8 @@ in `configs/cartpole/`:
   well controlled with 1° of angle noise and a 1° offset
 - `learned-noise-offset.json`: the same conditions with a learned
   controller, the trained model in `models/normalized-seed3/`
+- `lqr-precise.json`: the LQR gains for angle cost 0.3, position cost
+  0.2 and force cost 0.3, made by `lqr.py` (see below)
 
 Trained models worth keeping, for configs to point at, go in
 `models/NAME/`, which is tracked by git (`runs/` isn't, so a config
@@ -583,9 +585,64 @@ what makes it robust to noise it never trained on. Kv comes out small,
 smaller than the hand-tuned 1. Learning rates: 0.3 is slow, 1 works,
 3 is best, and 10 is unstable (one seed's policy fell to 127 steps).
 
+## lqr.py: the optimal linear controller
+
+The learned continuous controller has the same form as the classic
+LQR (linear-quadratic regulator) solution: force = gains · state. And
+while the pole stays up, maximizing train.py's reward (1 per step less
+squared angle, position and force costs) is the same as minimizing
+discounted quadratic costs, which is LQR's problem. `lqr.py` solves it
+directly, for costs given in train.py's terms (or read from a train.py
+config), and prints the optimal gains next to the gentle PD gains, the
+closed loop's modes (how fast each decays, and whether it oscillates),
+and the `cartpole.py` command that runs them; `--save` writes a
+`cartpole.py` config.
+
+The model is Gymnasium's equations linearized about upright,
+angle_accel = 15.78·θ − 1.463·F and x_accel = −0.717·θ + 0.976·F (the
+same numbers as the characteristic polynomial in "Choosing the four
+gains"), stepped by explicit Euler like Gymnasium, so it's exact for
+small angles. The gains come from iterating the discrete Riccati
+equation. A force cost is required: with free force, the optimal gains
+are infinite, which is also why training with no force cost keeps
+making the gains stiffer.
+
+```sh
+uv run python cartpole/lqr.py --angle-cost 0.3 --position-cost 0.2 --force-cost 0.3
+uv run python cartpole/lqr.py --force-cost 0.3 --config cartpole/configs/train/continuous-precise.json
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/lqr-precise.json
+```
+
+LQR against the hand-tuned and learned gains (5 m track, 20 s, 10
+seeds; survival, RMS angle and cart position, mean force):
+
+| controller | Kx, Kv, Kp, Kd | perfect sensor | 1° noise + 1° offset | 2° noise |
+|---|---|---|---|---|
+| gentle PD, no smoothing | 0.5, 1, 20, 3 | 10/10, 0.20° | 0.98°, 0.65 m, 3.1 N | 6/10, 10.8° |
+| learned (continuous, precise + force, mean of 4) | 0.83, 0.80, 24, 2.45 | 10/10, 0.20° | 0.92°, 0.51 m, 2.7 N | 10/10, 3.0° |
+| LQR, force cost 1 | 0.97, 2.0, 40, 8.6 | 10/10, 0.14° | 2.3°, 0.66 m, 6.6 N | 0/10 |
+| LQR, force cost 0.3 (`lqr-precise.json`) | 1.8, 3.5, 60, 11.3 | 10/10, 0.12° | 2.7°, 0.56 m, 7.4 N | 0/10 |
+| LQR, force cost 0.03 | 5.3, 9.8, 145, 21 | 10/10, 0.10° | 3.5°, 0.50 m, 8.7 N | 0/10 |
+
+- With a perfect sensor LQR is best, as it should be: it's optimal for
+  that problem. For the same costs it's far stiffer than what training
+  learned (Kp 60 against about 24): training hadn't reached the optimum,
+  and a 1000-batch run kept stiffening toward it.
+- With noise LQR does badly: it assumes it knows the true state, and its
+  large Kd multiplies the noise that differencing amplifies. The learned
+  gains, short of the optimum, happen to be robust.
+- The principled fix is LQG: a Kalman filter estimates the state
+  (including both velocities) from the noisy readings, using the model,
+  and LQR acts on the estimate. Alternatively, training with noise
+  would let RL find the best gains for the noisy problem directly,
+  without modelling the noise.
+
 ## Tests
 
-`tests/` checks the logic that would fail silently rather than crash:
+`tests/` checks the logic that would fail silently rather than crash
+(including, for `lqr.py`, the linear model against the hand-worked
+characteristic polynomial and the solution against the Riccati
+equation):
 the config rules (precedence, unknown keys, types, choices), the rate
 estimation, the controllers (including that scaling the learned weights
 doesn't change the pushes), the REINFORCE maths (returns by hand, the
