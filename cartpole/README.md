@@ -4,6 +4,95 @@ Experiments with CartPole: a pole balanced on a cart that moves along a
 frictionless track. The physics and renderer come from Gymnasium's
 `CartPole-v1`, which follows Barto, Sutton and Anderson (1983).
 
+## Highlights
+
+The experiment went through five stages, each comparing controllers on
+the same simulation:
+
+1. **No control:** the pole falls in about a second.
+2. **Classical control** (`cartpole.py`): P, then PD on the angle, then
+   cart position and velocity feedback, tuned by hand and checked
+   against the linearized characteristic polynomial.
+3. **Learned control** (`train.py`): REINFORCE written from scratch in
+   numpy, with a linear policy that pushes full force left or right,
+   then also not at all (to spare the motor), then with any force.
+4. **Optimal control** (`lqr.py`): LQR, the provably best linear
+   controller for the linearized, noise-free problem.
+5. **State estimation** (`kalman.py`): a Kalman filter that knows the
+   physics near upright but isn't told the sensor noise, estimating the
+   velocities and the angle sensor's offset from position and angle
+   readings alone; LQR acting on its estimates is LQG.
+
+How the main controllers compare with noisy sensors (1° angle noise, a
+1° angle offset, 1 cm position noise) on a 5 m track for 20 s, 10
+seeds; all survive every run:
+
+| controller | RMS angle | RMS cart position | mean force |
+|---|---|---|---|
+| hand-tuned PD (Kp 20, Kd 3, Kx 0.5, Kv 1), differenced rates, smoothed | 0.94° | 0.65 m | 2.8 N |
+| learned continuous force, differenced rates | 0.98° | 0.45 m | 2.7 N |
+| LQR, differenced rates | 2.77° | 0.56 m | 7.5 N |
+| hand-tuned PD on the Kalman filter | 1.75° | 0.18 m | 0.4 N |
+| learned, trained on the Kalman filter (4 seeds) | 1.2° to 1.6° | 0.12 to 0.31 m | 0.4 to 0.5 N |
+| LQR on the Kalman filter (LQG) | 0.86° | 0.15 m | 0.5 N |
+
+With heavier noise (2° of angle noise, a 1° offset and 10 cm of
+position noise) only the controllers on the filter survive, and LQG
+still holds the pole within 1.75°.
+
+What was learned along the way:
+
+- The cart terms need counter-intuitive positive gains (push the cart
+  further from the centre to tip the pole back toward it), and the pole
+  loop must be stiffer than the cart loop.
+- A learned controller that can only push full force survives but is
+  sloppy. Normalizing the inputs mattered enormously: without it the
+  weights on the bigger inputs (the rates) learn far faster, an
+  artefact of units.
+- A policy can come to rely on its own training randomness: the
+  three-action policy faked gentle pushes with random ones, and its
+  deterministic version did worse. Keeping the best checkpoint, tested
+  without randomness, guards against this.
+- Given a continuous force, REINFORCE learned gains close to the
+  hand-tuned ones without any physics; costs on angle and position in
+  the reward made it reliable.
+- LQR is best with a perfect sensor but poor with a noisy one: its stiff
+  gains multiply the noise that differencing amplifies.
+- Training on noisy readings shrank the gains on the noisy inputs (Kd,
+  Kv), leaving under-damped controllers; a memoryless linear policy can
+  only choose gains, not filter. The Kalman filter fixed the estimates,
+  after which every controller became robust and gentle, and LQG became
+  the best.
+
+To see them:
+
+```sh
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noisy-sensors.json
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/learned-noisy-sensors.json
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/lqg-noisy-sensors.json
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noisy-sensors.json --compare-estimates
+uv run python cartpole/train.py --config cartpole/configs/train/continuous-kalman.json --seed 2
+```
+
+The files:
+
+| file | what it does |
+|---|---|
+| `cartpole.py` | the simulation wrapper, sensors, hand-tuned and learned controllers; runs one episode and reports how well it was controlled |
+| `train.py` | trains a learned controller with REINFORCE and saves each run |
+| `lqr.py` | computes LQR gains for given costs |
+| `kalman.py` | the Kalman filter |
+| `model.py` | the linear model near upright, shared by `lqr.py` and `kalman.py` |
+| `config.py` | settings from defaults, JSON config files and the command line |
+| `runs.py` | lists, promotes and deletes training runs |
+| `configs/` | settings worth keeping: `train/` for `train.py`, `cartpole/` for `cartpole.py` |
+| `models/` | trained models worth keeping (git-tracked copies of runs) |
+| `runs/` | every training run (ignored by git) |
+| `tests/` | `uv run pytest` |
+
+The rest of this README goes through each stage in the order it was
+built, with the experiments and numbers behind the results above.
+
 ## The system
 
 The state is four numbers: cart position, cart velocity, pole angle and
