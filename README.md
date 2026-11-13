@@ -15,14 +15,17 @@ level once there's a second user for it.
 
 | Directory | What's in it |
 |---|---|
-| [cartpole](cartpole/README.md) | Balancing a pole on a cart (Gymnasium's CartPole), with hand-tuned controllers (P, and PD with cart feedback) seen through an imperfect angle sensor, and controllers learned with REINFORCE written from scratch in numpy (push left or right, or also not push, to spare the motor) |
+| [cartpole](cartpole/README.md) | Balancing a pole on a cart (Gymnasium's CartPole), with hand-tuned controllers (P, and PD with cart feedback) seen through an imperfect angle sensor, and controllers learned with REINFORCE written from scratch in numpy (full-force pushes, a choice not to push, or any force), the optimal LQR controller, and a Kalman filter that makes them all robust to sensor noise (LQG) |
+| [go](go/README.md) | Go on a small board (5 × 5 or 7 × 7), rules written from scratch: random players so far, learned players to come |
 
-To try it, from the repo root:
+To try them, from the repo root:
 
 ```sh
-uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noise-offset.json      # hand-tuned PD
-uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/learned-noise-offset.json # learned
-uv run python cartpole/train.py --config cartpole/configs/train/normalized.json --seed 3       # train one
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/pd-noisy-sensors.json      # hand-tuned PD
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/learned-noisy-sensors.json # learned
+uv run python cartpole/cartpole.py --config cartpole/configs/cartpole/lqg-noisy-sensors.json     # LQG
+uv run python cartpole/train.py --config cartpole/configs/train/continuous-kalman.json --seed 2  # train one
+uv run python go/play.py --black eye-aware --white eye-aware                                    # random Go
 ```
 
 ## Setup

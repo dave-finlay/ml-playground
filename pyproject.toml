@@ -28,16 +28,16 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["cartpole/tests"]
+testpaths = ["cartpole/tests", "go/tests"]
 # Tests import the experiment's modules the way its scripts do.
-pythonpath = ["cartpole"]
+pythonpath = ["cartpole", "go"]
 
 [tool.ruff]
 line-length = 88
 # Experiment directories hold scripts that import each other's modules
 # (e.g. cartpole/train.py imports cartpole/config.py), so treat modules
 # there as first-party when sorting imports.
-src = [".", "cartpole"]
+src = [".", "cartpole", "go"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
