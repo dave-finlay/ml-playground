@@ -18,6 +18,7 @@ from train import (
     count_reversals,
     dead_band,
     discounted_returns,
+    make_sensor,
     play_episode,
     policy_gradient,
     relies_on_randomness,
@@ -125,6 +126,8 @@ def test_scale_to_kp():
         {"force_std": 2.0},  # needs continuous actions
         {"actions": "continuous", "force_std": 0.0},
         {"actions": "continuous", "push_cost": 0.1},  # needs three actions
+        {"angle_noise": -1.0},
+        {"position_noise": -0.01},
     ],
 )
 def test_train_config_rejects_out_of_range(changes):
@@ -421,3 +424,49 @@ def test_csv_files_use_unix_line_endings(tmp_path):
     for name in ("curve.csv", "checkpoints.csv"):
         text = (tmp_path / name).read_bytes()
         assert b"\r" not in text and text.count(b"\n") == 2
+
+
+def test_perfect_sensor_settings_mean_no_sensor():
+    assert make_sensor(TrainConfig(), seed=1) is None
+    sensor = make_sensor(TrainConfig(angle_noise=1.0, position_noise=0.01), seed=1)
+    assert sensor.noise_std == pytest.approx(math.radians(1.0))
+    assert sensor.position_noise_std == 0.01
+
+
+def test_the_policy_sees_the_sensor_readings(capsys):
+    """With a noisy sensor, the policy's inputs are noisy readings (rates
+    differenced from them); the costs still use the true state."""
+    noisy = make_sensor(TrainConfig(position_noise=0.05), seed=2)
+
+    def first_inputs(sensor):
+        cartpole = CartPole.make(angle_limit=None)
+        inputs, _, _, rewards = play_episode(
+            cartpole, AlwaysDoes(1), "difference", None, seed=7, sensor=sensor
+        )
+        cartpole.close()
+        return inputs, rewards
+
+    perfect_inputs, perfect_rewards = first_inputs(None)
+    noisy_inputs, noisy_rewards = first_inputs(noisy)
+    assert len(perfect_inputs) == len(noisy_inputs)  # same true episode
+    assert perfect_rewards == noisy_rewards
+    position_errors = noisy_inputs[:, 0] - perfect_inputs[:, 0]
+    assert np.std(position_errors) == pytest.approx(0.05, rel=0.3)
+    assert noisy_inputs[:, 2] == pytest.approx(perfect_inputs[:, 2])  # angle exact
+
+
+def test_training_with_noise_is_repeatable(capsys):
+    config = TrainConfig(
+        seed=4,
+        batches=3,
+        batch_size=2,
+        actions="continuous",
+        angle_noise=1.0,
+        position_noise=0.01,
+        checkpoint_every=0,
+    )
+    first = training_result(config, capsys)
+    second = training_result(config, capsys)
+    assert first.curve == second.curve
+    quiet = training_result(dataclasses.replace(config, angle_noise=0.0), capsys)
+    assert quiet.curve != first.curve

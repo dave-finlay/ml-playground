@@ -87,6 +87,7 @@ from cartpole import (
     CartPole,
     ForceRecorder,
     RateEstimator,
+    Sensor,
     control_quality,
     controller_from_weights,
     count_reversals,
@@ -176,6 +177,18 @@ class TrainConfig:
     position_cost: float = setting(
         0.0, "taken off the reward times (cart position / 2.4 m) squared"
     )
+    angle_noise: float = setting(
+        0.0, "angle sensor noise in training and testing: standard deviation in degrees"
+    )
+    angle_scale: float = setting(
+        1.0, "angle sensor scale error: reading = scale x true angle"
+    )
+    angle_offset: float = setting(
+        0.0, "angle sensor offset error in degrees, added to every reading"
+    )
+    position_noise: float = setting(
+        0.0, "cart position sensor noise: standard deviation in metres"
+    )
     batches: int = setting(200, "number of weight updates")
     batch_size: int = setting(10, "episodes played per update")
     learning_rate: float = setting(10.0, "step size for each update")
@@ -219,6 +232,9 @@ class TrainConfig:
             raise ValueError("push_cost needs actions 3")
         if self.force_cost and self.actions != "continuous":
             raise ValueError("force_cost needs actions continuous")
+        for name in ("angle_noise", "position_noise"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} should be at least 0")
         if self.force_std <= 0:
             raise ValueError("force_std should be more than 0")
         if self.force_std != 5.0 and self.actions != "continuous":
@@ -436,15 +452,45 @@ class Costs:
 NO_COSTS = Costs()
 
 
+def make_sensor(config, seed):
+    """The sensor config's sensor settings describe, its noise seeded with
+    seed, or None if they describe a perfect one (then readings are the
+    state itself, exactly as before there were sensor settings)."""
+    settings = (
+        config.angle_noise,
+        config.angle_scale,
+        config.angle_offset,
+        config.position_noise,
+    )
+    if settings == (0.0, 1.0, 0.0, 0.0):
+        return None
+    return Sensor(
+        scale=config.angle_scale,
+        offset=math.radians(config.angle_offset),
+        noise_std=math.radians(config.angle_noise),
+        position_noise_std=config.position_noise,
+        seed=seed,
+    )
+
+
 def play_episode(
-    cartpole, policy, rate_from, rng, seed=None, scales=None, costs=NO_COSTS
+    cartpole,
+    policy,
+    rate_from,
+    rng,
+    seed=None,
+    scales=None,
+    costs=NO_COSTS,
+    sensor=None,
 ):
     """Play one episode, sampling actions from policy.
 
     The policy's inputs come from the state through a RateEstimator, so
     with rate_from "difference" it sees the rates the way cartpole.py's
     controllers estimate them. If scales is given, each input is divided
-    by its scale. Each step's reward is reduced by costs.
+    by its scale. Each step's reward is reduced by costs. With a sensor,
+    the policy sees its readings rather than the true state (the costs
+    still use the true state).
 
     Returns (inputs, actions, probs, rewards), one entry per step: what
     the policy saw, the action, what the policy's sample() returned with
@@ -456,7 +502,8 @@ def play_episode(
     state = cartpole.reset(seed=seed)
     terminated = truncated = False
     while not (terminated or truncated):
-        seen = np.array(rates.update(state))
+        reading = sensor.read(state) if sensor else state
+        seen = np.array(rates.update(reading))
         if scales is not None:
             seen = seen / scales
         action, p = policy.sample(seen, rng)
@@ -487,14 +534,20 @@ def policy_gradient(policy, episodes, gamma):
     return policy.gradient(inputs, actions, probs, advantages)
 
 
-def measure_input_scales(cartpole, config, rng, episodes):
+def measure_input_scales(cartpole, config, rng, episodes, sensor=None):
     """Return the standard deviation of each of the policy's inputs over
-    episodes played the way training starts (see new_policy)."""
+    episodes played the way training starts (see new_policy), seen
+    through sensor."""
     start = new_policy(config)
     inputs = np.concatenate(
         [
             play_episode(
-                cartpole, start, config.rate_from, rng, config.seed if i == 0 else None
+                cartpole,
+                start,
+                config.rate_from,
+                rng,
+                config.seed if i == 0 else None,
+                sensor=sensor,
             )[0]
             for i in range(episodes)
         ]
@@ -515,11 +568,19 @@ class TestResult:
 
 
 def evaluate(
-    cartpole, weights, rate_from, episodes, seed=None, kind=None, costs=NO_COSTS
+    cartpole,
+    weights,
+    rate_from,
+    episodes,
+    seed=None,
+    kind=None,
+    costs=NO_COSTS,
+    sensor=None,
 ):
     """Play episodes with the weights (of the given kind) as a controller,
-    without sampling, and return a TestResult. seed, if given, sets the
-    first starting state, which makes the whole set repeatable."""
+    without sampling, seeing the state through sensor (perfect if None),
+    and return a TestResult. seed, if given, sets the first starting state,
+    which (with a seeded sensor) makes the whole set repeatable."""
     lengths, returns, all_states, all_forces, reversals = [], [], [], [], 0
     for i in range(episodes):
         controller = ForceRecorder(
@@ -528,6 +589,7 @@ def evaluate(
         states, _ = run_simulation(
             cartpole,
             controller,
+            sensor,
             seed=seed if i == 0 else None,
             start_pause=0,
             end_pause=0,
@@ -647,8 +709,9 @@ def train(cartpole, config, rng, report_every=10):
     weights so far are kept. Ties go to the later checkpoint, which has
     trained longer.
     """
+    sensor = make_sensor(config, config.seed)
     if config.normalize_inputs:
-        scales = measure_input_scales(cartpole, config, rng, SCALE_EPISODES)
+        scales = measure_input_scales(cartpole, config, rng, SCALE_EPISODES, sensor)
         print("Input scales (x, x rate, angle, angle rate):", np.round(scales, 3))
     else:
         scales = np.ones(4)
@@ -681,6 +744,7 @@ def train(cartpole, config, rng, report_every=10):
                     episode_seed,
                     scales,
                     costs,
+                    sensor,
                 )
             )
         policy.weights += config.learning_rate * policy_gradient(
@@ -730,6 +794,7 @@ def train(cartpole, config, rng, report_every=10):
                 checkpoint_seed,
                 kind,
                 costs,
+                make_sensor(config, checkpoint_seed),
             )
             test_mean = float(np.mean(test.lengths))
             test_return = test.mean_return
@@ -1106,6 +1171,7 @@ def main():
         config.seed,
         kind,
         Costs.of(config),
+        make_sensor(config, config.seed),
     )
     cartpole.close()
     lengths = test.lengths
@@ -1129,7 +1195,7 @@ def main():
         controller = controller_from_weights(
             weights, cartpole.tau, FORCE, rate_from, kind
         )
-        states, _ = run_simulation(cartpole, controller)
+        states, _ = run_simulation(cartpole, controller, make_sensor(config, None))
         cartpole.close()
         print_summary(states, cartpole.tau, cartpole.angle_limit, cartpole.track_limit)
 

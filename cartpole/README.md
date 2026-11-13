@@ -345,6 +345,7 @@ command-line options from it (`learning_rate` becomes
 | `force_cost` | 0 | taken off the reward times (force / 10 N)² (needs `actions` continuous) |
 | `angle_cost` | 0 | taken off the reward times (pole angle / 12°)² |
 | `position_cost` | 0 | taken off the reward times (cart position / 2.4 m)² |
+| `angle_noise`, `angle_scale`, `angle_offset`, `position_noise` | perfect | sensor errors in training, checkpoints and the final test, as in `cartpole.py` |
 | `checkpoint_every` | 25 | test without sampling every this many batches, keep the best weights and say whether sampling does better; 0 turns it off |
 | `checkpoint_episodes` | 30 | test episodes at each checkpoint |
 | `batches` | 200 | number of updates |
@@ -364,6 +365,8 @@ only needs the settings it changes:
 - `continuous.json`: continuous force, survival only, learning rate 1
 - `continuous-precise.json`: continuous force with angle and position
   costs
+- `continuous-noisy.json`: the same plus a force cost, trained with 1°
+  of angle noise and 1 cm of position noise
 
 A new setting should default to the old behaviour, because configs
 (including saved runs' `config.json`) that leave it out get the
@@ -606,6 +609,50 @@ even though position control barely matters in 10 s. The small Kd is
 what makes it robust to noise it never trained on. Kv comes out small,
 smaller than the hand-tuned 1. Learning rates: 0.3 is slow, 1 works,
 3 is best, and 10 is unstable (one seed's policy fell to 127 steps).
+
+### Training under noise
+
+With sensor settings, the policy trains on noisy readings, with rates
+differenced from them, exactly as `cartpole.py` controllers see them
+(the costs still use the true state). Input scales are measured from
+the noisy readings, and checkpoints and the final test use the same
+noise, seeded. With a perfect sensor (the default) training is as it
+was before.
+
+Continuous force, normalized, learning rate 1, angle cost 0.3 and
+position cost 0.2, 4 seeds, trained with 1° of angle noise and 1 cm of
+position noise; tested on the 5 m track for 20 s, 10 seeds (RMS angle
+and mean force; "noisy sensors" is `*-noisy-sensors.json`: 1° angle
+noise, a 1° offset, 1 cm position noise):
+
+| controller | Kx, Kv, Kp, Kd | perfect | noisy sensors | 2° + 2 cm noise |
+|---|---|---|---|---|
+| hand-tuned PD (smoothing 0.1) | 0.5, 1, 20, 3 | 0.20°, 0.0 N | 0.94°, 2.8 N | 4.2°, 5.1 N |
+| learned without noise (`continuous-precise-seed1`) | 0.94, 0.59, 23, 2.5 | 0.20°, 0.0 N | 0.98°, 2.7 N | 3.1°, 5.0 N |
+| trained with noise (3 of 4 seeds; the 4th fails everything) | 0.6 to 1.6, −0.3 to −0.1, 26 to 34, 0.5 to 0.7 | 0.5° to 0.9° | 2.4° to 5.5°, 1.1 to 1.3 N | 2.7° to 3.4°, 1.8 to 2.4 N |
+| + force cost 0.3 (2 of 4 good) | 0.8 to 4.8, −0.25 to −0.1, 28 to 33, 0.4 to 0.6 | 0.6° to 6.6° | 3.0° to 15°, 1.1 to 2.5 N | 2.9° to 11°, 1.9 to 2.8 N |
+| + 1° offset in training | 1.9 to 3.6, −0.24 to 0.04, 27 to 35, 0.4 to 1.0 | 0.8° to 3.1° | 3.0° to 12°, 1.3 to 2.0 N | 3.3° to 10°, 2.1 to 2.9 N |
+
+- Training with noise learned to cut the noisy inputs: Kd fell from
+  about 2.5 to about 0.5, and Kv to about 0 (often slightly negative).
+  Those are the rates, and differencing makes them by far the noisiest
+  inputs. It's the classic errors-in-variables effect: a weight on an
+  input that's mostly noise shrinks toward zero.
+- So the controllers push gently (about 1 to 2.5 N, under half of PD's
+  force under heavy noise) and, in the heaviest noise, hold the pole as
+  well as or better than PD (2.7° against 4.2°). But with so little
+  damping they're sloppy with good sensors (0.5° or worse against 0.2°)
+  and with the moderate noisy-sensors scenario (2.4° or worse against
+  0.94°).
+- They're unreliable: Kv at or below 0 breaks the cart loop's stability
+  condition (Kv > 0), but the cart's slow swing takes longer than a 10 s
+  training episode on a 2.4 m track to show, so training can't see it
+  and some seeds fail the 20 s test.
+- What would help: longer training episodes on the wider track, so
+  slow cart instability costs something; smoothing the rates before the
+  policy sees them; or estimating them properly with a Kalman filter,
+  which would let a controller keep its damping without amplifying the
+  noise.
 
 ## lqr.py: the optimal linear controller
 

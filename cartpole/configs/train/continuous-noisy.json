@@ -1,0 +1,11 @@
+{
+  "description": "Continuous force trained with noisy sensors (1 degree of angle noise, 1 cm of position noise), with angle, position and force costs",
+  "normalize_inputs": true,
+  "learning_rate": 1.0,
+  "actions": "continuous",
+  "angle_cost": 0.3,
+  "position_cost": 0.2,
+  "force_cost": 0.3,
+  "angle_noise": 1.0,
+  "position_noise": 0.01
+}
