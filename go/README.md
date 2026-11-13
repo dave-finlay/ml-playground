@@ -46,7 +46,16 @@ shows one game move by move:
 uv run python go/play.py                                    # 1000 random games, 5x5
 uv run python go/play.py --size 7 --black eye-aware --white eye-aware
 uv run python go/play.py --watch --seed 3                   # one game, move by move
+uv run python go/play.py --window --black eye-aware --white eye-aware
 ```
+
+`--window` plays one game in a pygame window (`view.py`): the board with
+its coordinates, a red dot on the latest stone, and the move and
+captures so far below. `--delay` sets the seconds between moves
+(default 0.5); space pauses and resumes, and Escape or closing the
+window stops the game. At the end each side's territory is marked with
+small squares of its colour, and the score stays up until a key is
+pressed.
 
 ## Random against random
 

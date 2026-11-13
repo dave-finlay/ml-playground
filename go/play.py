@@ -6,6 +6,7 @@ Run from the repo root:
     uv run python go/play.py --size 7 --games 500
     uv run python go/play.py --komi 2.5 --seed 1
     uv run python go/play.py --watch --seed 3     # one game, move by move
+    uv run python go/play.py --window --black eye-aware --white eye-aware
     uv run python go/play.py --black eye-aware --white eye-aware
 
 Players: random (uniform over legal moves, passing included) and
@@ -22,22 +23,76 @@ from players import EyeAwareRandomPlayer, RandomPlayer
 PLAYERS = {"random": RandomPlayer, "eye-aware": EyeAwareRandomPlayer}
 
 
-def play_game(game, black, white, watch=False):
+def describe_move(game, move, mover, captured):
+    """A line like "Move 12: Black C3, capturing 2"."""
+    colour = "Black" if mover == BLACK else "White"
+    took = f", capturing {captured}" if captured else ""
+    return f"Move {len(game.moves)}: {colour} {game.name(move)}{took}"
+
+
+def play_game(game, black, white, after_move=None):
     """Play game to the end, black and white choosing the moves, and
-    return it. With watch, print the board after every move."""
+    return it. after_move, if given, is called after every move with
+    (game, move, mover, stones captured); returning False stops the
+    game early."""
     while not game.over:
         mover = game.to_play
         move = (black if mover == BLACK else white)(game)
         captured_before = game.captures[mover]
         game.play(move)
-        if watch:
-            colour = "Black" if mover == BLACK else "White"
+        if after_move is not None:
             captured = game.captures[mover] - captured_before
-            took = f", capturing {captured}" if captured else ""
-            print(f"Move {len(game.moves)}: {colour} {game.name(move)}{took}")
-            print(game)
-            print()
+            if after_move(game, move, mover, captured) is False:
+                break
     return game
+
+
+def print_move(game, move, mover, captured):
+    """after_move for play_game: print the move and the board."""
+    print(describe_move(game, move, mover, captured))
+    print(game)
+    print()
+
+
+def final_caption(game):
+    area = game.area()
+    return (
+        f"Game over after {len(game.moves)} moves ({ending(game)}): Black "
+        f"{area[BLACK]}, White {area[WHITE]} + komi {game.komi:g}: "
+        f"{describe_result(game)}."
+    )
+
+
+def watch_in_window(game, black, white, delay):
+    """Play game in a pygame window, pausing delay seconds after each
+    move, then show the result with territory until a key is pressed."""
+    from view import BoardView  # only needed with a window
+
+    view = BoardView(game.size)
+    names = {BLACK: "Black", WHITE: "White"}
+    view.show(game, caption=f"{names[BLACK]} to play", seconds=delay)
+
+    def show_move(game, move, mover, captured):
+        line = describe_move(game, move, mover, captured)
+        tally = (
+            f"Captured so far: Black {game.captures[BLACK]}, "
+            f"White {game.captures[WHITE]}"
+        )
+        return view.show(game, move, f"{line}\n{tally}", seconds=delay)
+
+    play_game(game, black, white, after_move=show_move)
+    if game.over:
+        area = game.area()
+        caption = (
+            f"{describe_result(game).capitalize()} after {len(game.moves)} moves\n"
+            f"Black {area[BLACK]}, White {area[WHITE]} + komi {game.komi:g}"
+            " (any key to close)"
+        )
+        view.finish(game, caption)
+        print(final_caption(game))
+    else:
+        view.close()
+        print(f"Stopped after {len(game.moves)} moves.")
 
 
 def describe_result(game):
@@ -121,7 +176,18 @@ def parse_args():
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="play one game and show the board after every move",
+        help="play one game and print the board after every move",
+    )
+    parser.add_argument(
+        "--window",
+        action="store_true",
+        help="play one game in a window (space pauses, Escape stops)",
+    )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="with --window, seconds between moves (default: 0.5)",
     )
     return parser.parse_args()
 
@@ -135,14 +201,12 @@ def main():
     def new_game():
         return Game(args.size, komi=args.komi, max_moves=args.max_moves)
 
+    if args.window:
+        watch_in_window(new_game(), black, white, args.delay)
+        return
     if args.watch:
-        game = play_game(new_game(), black, white, watch=True)
-        area = game.area()
-        print(
-            f"Game over after {len(game.moves)} moves ({ending(game)}): Black "
-            f"{area[BLACK]}, White {area[WHITE]} + komi {game.komi:g}: "
-            f"{describe_result(game)}."
-        )
+        game = play_game(new_game(), black, white, after_move=print_move)
+        print(final_caption(game))
         return
     print_summary([play_game(new_game(), black, white) for _ in range(args.games)])
 

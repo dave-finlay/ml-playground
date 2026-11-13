@@ -310,3 +310,11 @@ def test_eye_aware_games_end_by_passing(size):
             Game(size), EyeAwareRandomPlayer(seed), EyeAwareRandomPlayer(seed + 100)
         )
         assert game.passes_in_a_row == 2
+
+
+def test_territory_marks_the_empty_points_each_side_owns():
+    game = Game.from_rows(["X . O", "X . O", "X . O"])
+    assert game.territory() == {}  # the middle column touches both
+    game = Game.from_rows([". X O", "X X O", ". X O"])
+    corners = {point(game, "A3"): BLACK, point(game, "A1"): BLACK}
+    assert game.territory() == corners

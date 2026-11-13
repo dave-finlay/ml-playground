@@ -168,10 +168,12 @@ class Game:
         limit reached."""
         return self.passes_in_a_row >= 2 or len(self.moves) >= self.max_moves
 
-    def area(self):
-        """Return {BLACK: points, WHITE: points}: each colour's stones plus
-        the empty regions that border only that colour."""
-        area = {BLACK: self.board.count(BLACK), WHITE: self.board.count(WHITE)}
+    def territory(self):
+        """Return {point: colour} for the empty points that count for a
+        colour: those in empty regions bordered only by that colour's
+        stones. Empty points in regions touching both colours (or none)
+        are left out."""
+        territory = {}
         counted = set()
         for point in range(self.pass_move):
             if self.board[point] != EMPTY or point in counted:
@@ -187,8 +189,18 @@ class Game:
                         borders.add(self.board[neighbour])
             counted |= region
             if len(borders) == 1:
-                area[borders.pop()] += len(region)
-        return area
+                owner = borders.pop()
+                territory.update(dict.fromkeys(region, owner))
+        return territory
+
+    def area(self):
+        """Return {BLACK: points, WHITE: points}: each colour's stones plus
+        its territory (see territory)."""
+        owners = list(self.territory().values())
+        return {
+            colour: self.board.count(colour) + owners.count(colour)
+            for colour in (BLACK, WHITE)
+        }
 
     def margin(self):
         """Black's score minus White's (komi included): positive means
