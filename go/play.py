@@ -25,6 +25,7 @@ import contextlib
 import statistics
 
 from game import BLACK, EMPTY, WHITE, Game
+from mcts import MCTSPlayer
 from players import EyeAwareRandomPlayer, HumanPlayer, RandomOpening, RandomPlayer
 
 # Computer players, by name. "human" (you, clicking in the window) and
@@ -33,6 +34,7 @@ from players import EyeAwareRandomPlayer, HumanPlayer, RandomOpening, RandomPlay
 PLAYERS = {"random": RandomPlayer, "eye-aware": EyeAwareRandomPlayer}
 HUMAN = "human"
 LEARNED = "learned"
+MCTS = "mcts"  # tree search with eye-aware playouts: --simulations per move
 
 
 def describe_move(game, move, mover, captured):
@@ -75,12 +77,15 @@ def final_caption(game):
     )
 
 
-def make_player(name, seed, view=None, model=None):
+def make_player(name, seed, view=None, model=None, simulations=400):
     """The player called name, seeded with seed; a human player asks
-    through view (a BoardView), and a learned one plays the network saved
-    at model, always taking its likeliest move."""
+    through view (a BoardView), a learned one plays the network saved at
+    model, always taking its likeliest move, and mcts searches with
+    simulations simulations per move."""
     if name == HUMAN:
         return HumanPlayer(view)
+    if name == MCTS:
+        return MCTSPlayer(simulations, seed=seed)
     if name == LEARNED:
         from policy import NetworkPlayer, load_network  # needs PyTorch
 
@@ -89,7 +94,14 @@ def make_player(name, seed, view=None, model=None):
 
 
 def watch_in_window(
-    game, black_name, white_name, seed, delay, black_model=None, white_model=None
+    game,
+    black_name,
+    white_name,
+    seed,
+    delay,
+    black_model=None,
+    white_model=None,
+    simulations=400,
 ):
     """Play game in a pygame window between the players named (either may
     be "human", clicking in the window), pausing delay seconds after each
@@ -98,9 +110,11 @@ def watch_in_window(
     from view import BoardView, QuitGame  # only needed with a window
 
     view = BoardView(game.size)
-    black = make_player(black_name, None if seed is None else seed, view, black_model)
+    black = make_player(
+        black_name, None if seed is None else seed, view, black_model, simulations
+    )
     white = make_player(
-        white_name, None if seed is None else seed + 1, view, white_model
+        white_name, None if seed is None else seed + 1, view, white_model, simulations
     )
     humans = {
         colour
@@ -222,13 +236,13 @@ def parse_args():
     )
     parser.add_argument(
         "--black",
-        choices=[*PLAYERS, HUMAN, LEARNED],
+        choices=[*PLAYERS, HUMAN, LEARNED, MCTS],
         default="random",
         help="Black's player (default: random)",
     )
     parser.add_argument(
         "--white",
-        choices=[*PLAYERS, HUMAN, LEARNED],
+        choices=[*PLAYERS, HUMAN, LEARNED, MCTS],
         default="random",
         help="White's player (default: random)",
     )
@@ -267,6 +281,13 @@ def parse_args():
         help="a different network for a learned White (overrides --model)",
     )
     parser.add_argument(
+        "--simulations",
+        type=int,
+        default=400,
+        help="for mcts players, simulations per move: more is stronger and "
+        "slower (default: 400)",
+    )
+    parser.add_argument(
         "--opening",
         type=int,
         default=0,
@@ -293,6 +314,8 @@ def parse_args():
         parser.error("--opening is for computer players, not human ones")
     if args.swap and (args.window or args.watch):
         parser.error("--swap is for many games, not --window or --watch")
+    if args.simulations != 400 and MCTS not in (args.black, args.white):
+        parser.error("--simulations needs an mcts player")
     if args.komi is None:
         args.komi = models_komi(parser, args)
     return args
@@ -316,8 +339,12 @@ def models_komi(parser, args):
     return komis.pop() if komis else 0.0
 
 
-def describe_player(name, model):
-    return f"learned ({model})" if name == LEARNED else name
+def describe_player(name, model, simulations=400):
+    if name == LEARNED:
+        return f"learned ({model})"
+    if name == MCTS:
+        return f"mcts ({simulations} simulations)"
+    return name
 
 
 def main():
@@ -338,11 +365,20 @@ def main():
             args.delay,
             black_model,
             white_model,
+            args.simulations,
         )
         return
-    black = make_player(args.black, None if seed is None else seed, model=black_model)
+    black = make_player(
+        args.black,
+        None if seed is None else seed,
+        model=black_model,
+        simulations=args.simulations,
+    )
     white = make_player(
-        args.white, None if seed is None else seed + 1, model=white_model
+        args.white,
+        None if seed is None else seed + 1,
+        model=white_model,
+        simulations=args.simulations,
     )
 
     def with_opening(player, game_number, offset):
@@ -371,8 +407,8 @@ def main():
         print_head_to_head(
             games,
             (
-                describe_player(args.black, black_model),
-                describe_player(args.white, white_model),
+                describe_player(args.black, black_model, args.simulations),
+                describe_player(args.white, white_model, args.simulations),
             ),
         )
     if args.black == args.white == LEARNED and not args.opening:

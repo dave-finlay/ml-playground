@@ -76,6 +76,21 @@ class Game:
         game._seen = {tuple(game.board)}
         return game
 
+    def copy(self):
+        """An independent copy of the game so far, to play on without
+        changing this one (for looking ahead)."""
+        game = Game.__new__(Game)
+        game.size, game.komi, game.max_moves = self.size, self.komi, self.max_moves
+        game.pass_move = self.pass_move
+        game.board = list(self.board)
+        game.to_play = self.to_play
+        game.moves = list(self.moves)
+        game.captures = dict(self.captures)
+        game.passes_in_a_row = self.passes_in_a_row
+        game._seen = set(self._seen)
+        game._neighbours = self._neighbours  # never changes, so shared
+        return game
+
     def _neighbours_of(self, point):
         row, column = divmod(point, self.size)
         neighbours = []

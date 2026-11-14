@@ -415,6 +415,53 @@ against the starting network, averaged over both colours:
 - Single runs with noisy tests (about ±7%); small differences need
   several seeds to judge.
 
+## mcts.py: looking ahead with tree search
+
+The networks choose moves by pattern, one look at the board, with no
+lookahead. `mcts.py` is a Monte Carlo tree search player, with no
+learning at all. For each move it runs many simulations, each of which:
+
+1. selects a path down the tree of continuations, at each step taking
+   the move with the best UCT score, wins / visits + 1.4 ×
+   √(ln parent visits / visits), balancing moves that have done well
+   against ones tried less often;
+2. expands one new position at the edge of the tree;
+3. evaluates it by playing out to the end with random moves that never
+   fill their own eyes (trying empty points in random order rather than
+   listing every legal move, about 0.4 ms a playout), scored by the
+   rules with komi;
+4. backs the result up along the path, as a win for the side that made
+   each move or a loss.
+
+It then plays its most-visited move. `play.py` has it as the `mcts`
+player, with `--simulations` per move (default 400; about 0.2 s a move,
+1000 about 0.45 s). `Game.copy()` gives each simulation its own copy of
+the position.
+
+```sh
+uv run python go/play.py --window --black human --white mcts --simulations 1000 --komi 7.5
+uv run python go/play.py --black mcts --white learned --model go/runs/komi.pt --simulations 1000 --swap --games 60
+```
+
+Against `komi.pt` under komi 7.5 (60 games each, colours alternating):
+
+| `mcts` | as Black | as White | overall |
+|---|---|---|---|
+| 100 simulations | 10% | 17% | 13% |
+| 400 simulations | 33% | 27% | 30% |
+| 1000 simulations | 77% | 43% | 60% |
+
+So `komi.pt`, one pass through the network per move, plays about as
+well as 700 to 900 simulations of plain search, about a third of a
+second of thinking a move, and search keeps getting stronger with more
+simulations while the network plays at one fixed strength. With no
+learning, just the rules, random playouts and counting, 1000
+simulations beat the best network. (60 games give about ±6%.)
+
+The next step is to have the network guide the search: its policy to
+choose which moves to explore, and its value head instead of random
+playouts (as in AlphaZero).
+
 ## Tests
 
 `uv run pytest` from the repo root runs them, with the other
