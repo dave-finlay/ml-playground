@@ -186,6 +186,45 @@ Black / as White (the starting network against itself scores 52% /
 - These are single runs with noisy tests (50 games per colour, roughly
   ±7%).
 
+### A critic (value head)
+
+With `--value`, the network also has a value head: from the same
+convolutions, each feature averaged over the board, then a linear layer
+and tanh give V, the expected result for the player to move (−1 to +1).
+Averaging suits it: area scoring is a sum over points of whose they
+are. Each move's advantage becomes its result z less the critic's
+estimate of the position before it, z − V(board), instead of less its
+colour's average (V should learn Black's advantage itself), and the
+critic learns by regression toward the results of the same recorded
+moves, (V − z)², weighted by `--value-weight` (default 0.5).
+`--value-detached` trains the critic without its loss reaching the
+shared convolutions. A network without a value head (like one trained
+by `learn.py`) gets a fresh one, choosing moves exactly as before.
+
+Same start, seed and settings as above (300 batches); best win rate
+against the starting network, averaged over both colours:
+
+| | best | critic predicts the winner | value loss |
+|---|---|---|---|
+| no critic (per-colour baseline) | 64% (batch 250) | | |
+| shared critic, weight 0.5 | 52% (batch 300) | 77% → 86% | 1.68 → 0.44 |
+| shared critic, weight 1.0 | 45% (batch 300) | 76% → 84% | 1.68 → 0.43 |
+| detached critic, weight 0.5 | 61% (batch 250) | 68% → 77% | 0.86 → 0.68 |
+
+- The critic learns to judge positions (predicting the winner about 85%
+  of the time), but sharing the convolutions slowed the policy's
+  improvement, and more so with the heavier weight: the value loss bends
+  the shared features toward judging positions at the expense of
+  choosing moves. Detaching it recovered most of the gap, at the cost
+  of a less accurate critic.
+- No critic beat the simple per-colour baseline within 300 batches. Its
+  advantages are also small when it's confidently right, so many moves
+  get little push. Next to try: the critic learning from the past
+  copies' moves too, and an advantage from the change in V across each
+  move (−V after the move − V before it).
+- Single runs with noisy tests (about ±7%); small differences need
+  several seeds to judge.
+
 ## Tests
 
 `uv run pytest` from the repo root runs them, with the other

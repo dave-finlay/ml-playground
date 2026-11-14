@@ -49,11 +49,18 @@ class PolicyNetwork(nn.Module):
     """Scores every move given encoded boards: input shape (batch, 3,
     size, size), output (batch, size * size + 1), the last column for
     passing. channels is the width of each convolution, layers how many
-    there are."""
+    there are.
 
-    def __init__(self, size, channels=32, layers=3):
+    With value, it also has a value head (a critic): from the same
+    convolutions, it averages each feature over the board, and a linear
+    layer and tanh give V, the expected result for the player to move,
+    from -1 (a sure loss) to +1 (a sure win). heads() returns both.
+    """
+
+    def __init__(self, size, channels=32, layers=3, value=False):
         super().__init__()
         self.size, self.channels, self.layers = size, channels, layers
+        self.has_value = value
         convolutions = []
         width = 3
         for _ in range(layers):
@@ -62,16 +69,43 @@ class PolicyNetwork(nn.Module):
         self.body = nn.Sequential(*convolutions)
         self.point_scores = nn.Conv2d(channels, 1, 1)
         self.pass_score = nn.Linear(channels, 1)
+        self.value_score = nn.Linear(channels, 1) if value else None
+
+    def heads(self, boards, detach_value=False):
+        """Return (move scores, values): values has shape (batch,), or is
+        None without a value head. With detach_value, the value head reads
+        the shared features without its training changing them (so the
+        critic can't disturb what the policy uses)."""
+        features = self.body(boards)
+        average = features.mean(dim=(2, 3))
+        points = self.point_scores(features).flatten(1)
+        scores = torch.cat([points, self.pass_score(average)], dim=1)
+        if self.value_score is None:
+            return scores, None
+        if detach_value:
+            average = average.detach()
+        return scores, torch.tanh(self.value_score(average)).squeeze(1)
 
     def forward(self, boards):
-        features = self.body(boards)
-        points = self.point_scores(features).flatten(1)
-        passing = self.pass_score(features.mean(dim=(2, 3)))
-        return torch.cat([points, passing], dim=1)
+        return self.heads(boards)[0]
 
     def settings(self):
         """What's needed to build the same network again."""
-        return {"size": self.size, "channels": self.channels, "layers": self.layers}
+        return {
+            "size": self.size,
+            "channels": self.channels,
+            "layers": self.layers,
+            "value": self.has_value,
+        }
+
+
+def with_value_head(network):
+    """A copy of network with a value head: its convolutions and move
+    scores unchanged (so it chooses moves exactly as before), and a new,
+    untrained value head if it had none."""
+    copy = PolicyNetwork(**{**network.settings(), "value": True})
+    copy.load_state_dict(network.state_dict(), strict=False)
+    return copy
 
 
 def save_network(path, network, extra=None):
@@ -140,3 +174,43 @@ def policy_gradient_loss(network, records, advantages, entropy_bonus=0.0):
     entropy = -(log_probs.exp() * log_probs.clamp(min=-30)).sum(dim=1).mean()
     loss = -(weights * taken).mean() - entropy_bonus * entropy
     return loss, float(entropy.detach())
+
+
+def actor_critic_loss(
+    network,
+    records,
+    results,
+    value_weight=0.5,
+    entropy_bonus=0.0,
+    detach_value=False,
+):
+    """The loss with a critic (the network's value head), for recorded
+    moves and each one's result z (+1, -1 or 0 for the side that made it):
+
+        advantage = z - V(board)    (V held fixed for the policy's part)
+        loss = -mean(advantage * log pi(move | board))
+               + value_weight * mean((V(board) - z)^2)
+               - entropy_bonus * mean entropy
+
+    With detach_value, the critic's loss trains only the value head, not
+    the shared convolutions. Returns (loss, mean entropy, value loss, how
+    often V's sign matched a decided result).
+    """
+    boards = torch.from_numpy(np.stack([board for board, _, _ in records]))
+    masks = torch.from_numpy(np.stack([mask for _, mask, _ in records]))
+    chosen = torch.tensor([move for _, _, move in records])
+    targets = torch.tensor(np.asarray(results), dtype=torch.float32)
+    scores, values = network.heads(boards, detach_value)
+    log_probs = torch.log_softmax(masked_logits(scores, masks), dim=1)
+    taken = log_probs[torch.arange(len(records)), chosen]
+    advantages = targets - values.detach()
+    entropy = -(log_probs.exp() * log_probs.clamp(min=-30)).sum(dim=1).mean()
+    value_loss = ((values - targets) ** 2).mean()
+    loss = (
+        -(advantages * taken).mean()
+        + value_weight * value_loss
+        - entropy_bonus * entropy
+    )
+    decided = targets != 0
+    correct = (torch.sign(values) == targets)[decided].float().mean()
+    return loss, float(entropy.detach()), float(value_loss.detach()), float(correct)

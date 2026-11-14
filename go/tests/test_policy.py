@@ -12,10 +12,12 @@ from players import EyeAwareRandomPlayer
 from policy import (
     NetworkPlayer,
     PolicyNetwork,
+    actor_critic_loss,
     encode,
     legal_mask,
     load_network,
     save_network,
+    with_value_head,
 )
 
 
@@ -118,4 +120,78 @@ def test_save_and_load(tmp_path):
     boards = torch.rand(2, 3, 5, 5)
     with torch.no_grad():
         assert torch.allclose(network(boards), loaded(boards))
-    assert loaded.settings() == {"size": 5, "channels": 8, "layers": 2}
+    assert loaded.settings() == {
+        "size": 5,
+        "channels": 8,
+        "layers": 2,
+        "value": False,
+    }
+
+
+def test_value_head_gives_one_estimate_per_board_between_minus_1_and_1():
+    network = PolicyNetwork(5, value=True)
+    scores, values = network.heads(torch.rand(4, 3, 5, 5) * 10)
+    assert scores.shape == (4, 26) and values.shape == (4,)
+    assert (values.abs() <= 1).all()
+    assert PolicyNetwork(5).heads(torch.zeros(1, 3, 5, 5))[1] is None
+
+
+def test_networks_saved_before_value_heads_still_load(tmp_path):
+    network = PolicyNetwork(5, channels=8, layers=1)
+    path = tmp_path / "old.pt"
+    settings = {"size": 5, "channels": 8, "layers": 1}  # no "value" key
+    torch.save({"settings": settings, "weights": network.state_dict()}, path)
+    assert not load_network(path).has_value
+
+
+def test_adding_a_value_head_keeps_the_move_choices():
+    torch.manual_seed(4)
+    network = PolicyNetwork(5, channels=8, layers=2)
+    critic = with_value_head(network)
+    boards = torch.rand(3, 3, 5, 5)
+    with torch.no_grad():
+        assert torch.allclose(network(boards), critic(boards))
+    assert critic.has_value
+
+
+def test_actor_critic_update_moves_the_critic_toward_the_result():
+    torch.manual_seed(5)
+    network = PolicyNetwork(3, channels=8, layers=1, value=True)
+    board, mask = encode(Game(3)), legal_mask(Game(3))
+    records, results = [(board, mask, 4)], [1.0]
+
+    def value():
+        with torch.no_grad():
+            return float(network.heads(torch.from_numpy(board)[None])[1][0])
+
+    before = value()
+    optimizer = torch.optim.SGD(network.parameters(), lr=0.5)
+    for _ in range(5):
+        loss, _, value_loss, _ = actor_critic_loss(network, records, results)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    assert value() > before
+
+
+def test_actor_critic_advantage_is_result_less_value():
+    """With the critic already predicting the result exactly, the move gets
+    no push either way: z - V = 0."""
+    network = PolicyNetwork(3, channels=8, layers=1, value=True)
+    board, mask = encode(Game(3)), legal_mask(Game(3))
+    with torch.no_grad():
+        network.value_score.weight.zero_()
+        network.value_score.bias.fill_(10.0)  # tanh(10) is about 1
+    loss, _, value_loss, right = actor_critic_loss(
+        network, [(board, mask, 4)], [1.0], value_weight=0.0
+    )
+    assert abs(loss.item()) < 1e-6 and right == 1.0
+
+
+def test_a_detached_critic_trains_only_the_value_head():
+    torch.manual_seed(6)
+    network = PolicyNetwork(5, channels=8, layers=2, value=True)
+    _, values = network.heads(torch.rand(2, 3, 5, 5), detach_value=True)
+    values.sum().backward()
+    assert network.value_score.weight.grad is not None
+    assert all(p.grad is None or not p.grad.any() for p in network.body.parameters())

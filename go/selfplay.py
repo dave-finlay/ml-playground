@@ -11,7 +11,11 @@ less the average result of that colour in the batch: a separate
 baseline for Black and White, so Black's first-move advantage doesn't
 make all of Black's moves look good. The update is REINFORCE's (see
 policy.policy_gradient_loss), with an optional bonus for keeping the
-move probabilities spread out (entropy): without it, self-play narrows
+move probabilities spread out (entropy). With --value the network has a
+critic (a value head), and each move's advantage is instead its result
+less the critic's estimate of the position before it (see
+policy.actor_critic_loss); the critic learns from the same moves. Without
+the entropy bonus, self-play narrows
 into one style that beats its recent selves but loses to older ones
 (a 300-batch run on 5 x 5 rose and then fell below where it started).
 
@@ -44,9 +48,11 @@ from players import EyeAwareRandomPlayer
 from policy import (
     NetworkPlayer,
     PolicyNetwork,
+    actor_critic_loss,
     load_network,
     policy_gradient_loss,
     save_network,
+    with_value_head,
 )
 
 
@@ -67,6 +73,16 @@ def play_training_game(network, opponent_network, colour, size, komi, rng):
     if opponent_network is None:
         sides.append((theirs, other(colour), result_for(game, other(colour))))
     return sides
+
+
+def moves_and_results(sides):
+    """Flatten sides into (records, results): every recorded move, and the
+    result of the side that made it."""
+    records, results = [], []
+    for side_records, _, result in sides:
+        records += side_records
+        results += [result] * len(side_records)
+    return records, results
 
 
 def advantages_by_colour(sides):
@@ -179,6 +195,25 @@ def parse_args():
         help="random opening moves per side in network-against-network tests "
         "(default: 2)",
     )
+    parser.add_argument(
+        "--value",
+        action="store_true",
+        help="add a critic (value head): each move's advantage becomes its "
+        "result less the critic's estimate before it, instead of less its "
+        "colour's average",
+    )
+    parser.add_argument(
+        "--value-weight",
+        type=float,
+        default=0.5,
+        help="with --value, the weight of the critic's loss (default: 0.5)",
+    )
+    parser.add_argument(
+        "--value-detached",
+        action="store_true",
+        help="with --value, train the critic without its loss changing the "
+        "shared convolutions",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random seed")
     parser.add_argument(
         "--save",
@@ -200,6 +235,8 @@ def main():
         network.train()
     else:
         network = PolicyNetwork(args.size)
+    if args.value and not network.has_value:
+        network = with_value_head(network)
     benchmark_path = args.benchmark or args.init
     benchmark = load_network(benchmark_path) if benchmark_path else None
     optimizer = torch.optim.Adam(network.parameters(), lr=args.learning_rate)
@@ -246,6 +283,7 @@ def main():
     print(
         f"{'batch':>5}  {'games':>6}  {'Black won':>9}  {'length':>6}  "
         f"{'entropy':>7}  pool"
+        + ("  value loss, sign right" if network.has_value else "")
     )
     start = time.perf_counter()
     for batch in range(1, args.batches + 1):
@@ -262,10 +300,23 @@ def main():
             black_result = first[2] if first[1] == BLACK else -first[2]
             black_wins.append(black_result > 0)
             lengths.append(sum(len(records) for records, _, _ in game_sides))
-        records, advantages = advantages_by_colour(sides)
-        loss, entropy = policy_gradient_loss(
-            network, records, advantages, args.entropy_bonus
-        )
+        critic = ""
+        if network.has_value:
+            records, results = moves_and_results(sides)
+            loss, entropy, value_loss, right = actor_critic_loss(
+                network,
+                records,
+                results,
+                args.value_weight,
+                args.entropy_bonus,
+                args.value_detached,
+            )
+            critic = f"  {value_loss:10.3f}  {100 * right:9.0f}%"
+        else:
+            records, advantages = advantages_by_colour(sides)
+            loss, entropy = policy_gradient_loss(
+                network, records, advantages, args.entropy_bonus
+            )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -275,7 +326,7 @@ def main():
             print(
                 f"{batch:5}  {batch * args.games:6}  "
                 f"{100 * np.mean(black_wins):8.0f}%  {np.mean(lengths):6.1f}  "
-                f"{entropy:7.2f}  {len(pool)}"
+                f"{entropy:7.2f}  {len(pool):4}{critic}"
             )
         if batch % args.eval_every == 0 or batch == args.batches:
             test(f"      batch {batch}", batch)

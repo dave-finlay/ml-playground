@@ -11,6 +11,7 @@ from policy import PolicyNetwork, encode, legal_mask, policy_gradient_loss
 from selfplay import (
     RandomOpening,
     advantages_by_colour,
+    moves_and_results,
     play_training_game,
     win_rates,
 )
@@ -79,3 +80,9 @@ def test_win_rates_are_between_0_and_1():
         PolicyNetwork(5), EyeAwareRandomPlayer, 4, 5, 0.0, seed=0, opening=1
     )
     assert 0 <= black <= 1 and 0 <= white <= 1
+
+
+def test_moves_and_results_label_each_move_with_its_sides_result():
+    a, b = (None, None, 1), (None, None, 2)
+    records, results = moves_and_results([([a, a], BLACK, 1.0), ([b], WHITE, -1.0)])
+    assert records == [a, a, b] and results == [1.0, 1.0, -1.0]
