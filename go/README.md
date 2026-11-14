@@ -186,6 +186,41 @@ Black / as White (the starting network against itself scores 52% /
 - These are single runs with noisy tests (50 games per colour, roughly
   ±7%).
 
+### Comparing networks
+
+`play.py` can pit two saved networks against each other:
+`--black-model` and `--white-model` give each `learned` player its own
+network (`--model` is the default for both). Two networks always taking
+their likeliest move would play the same game every time, so `--opening
+2` makes each side's first two moves random (eye-aware); `--swap`
+alternates colours game by game and reports each player's results as
+Black, as White and overall, the fair comparison given Black's
+advantage.
+
+```sh
+uv run python go/play.py --black learned --white learned --swap --opening 2 --games 400 \
+    --black-model go/runs/value.pt --white-model go/runs/selfplay-5x5-seed1.pt
+```
+
+A 1000-batch self-play run with the critic (300 batches, then resumed
+to 1000; best at batch 980, winning 80% as Black and 74% as White
+against its starting network in its own tests) against earlier
+networks, 400 games each:
+
+| `value.pt` against... | as Black | as White | overall |
+|---|---|---|---|
+| the network trained against eye-aware (its start) | 92% | 69% | 80.5% |
+| self-play without a critic, 300 batches | 82% | 59.5% | 71% |
+| self-play with a critic, 300 batches | 88% | 57.5% | 73% |
+| itself (a check: about even) | | | 53% / 47% |
+
+It kept improving all the way to batch 1000, with no collapse (entropy
+about 1.05 to 1.17 throughout), mostly by getting better as White
+(30% to 74% against the start). Dave can still beat it with either
+colour, but loses about half the time. After 300 batches the critic
+looked like no help; over 1000 it kept climbing, but the run without a
+critic hasn't been taken that far to compare.
+
 ### Carrying a run on
 
 With `--save go/runs/NAME.pt`, a resume file `go/runs/NAME-resume.pt` is

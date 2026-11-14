@@ -62,6 +62,23 @@ class EyeAwareRandomPlayer:
         return self._random.choice(moves) if moves else game.pass_move
 
 
+class RandomOpening:
+    """Wraps a player so the game's first `moves` moves per side are chosen
+    at random (by the eye-aware random player), then it plays as usual:
+    games between deterministic players then cover many positions instead
+    of repeating one game."""
+
+    def __init__(self, player, moves, seed):
+        self.player = player
+        self.moves = moves
+        self.random = EyeAwareRandomPlayer(seed)
+
+    def __call__(self, game):
+        if len(game.moves) < 2 * self.moves:
+            return self.random(game)
+        return self.player(game)
+
+
 class HumanPlayer:
     """Asks a person for the move: view (a BoardView, see view.py) shows
     the board and waits for a click on a point, or P to pass. Raises

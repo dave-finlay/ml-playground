@@ -51,7 +51,7 @@ import torch
 from game import BLACK, WHITE, Game, other
 from learn import result_for
 from play import play_game
-from players import EyeAwareRandomPlayer
+from players import EyeAwareRandomPlayer, RandomOpening
 from policy import (
     NetworkPlayer,
     PolicyNetwork,
@@ -104,22 +104,6 @@ def advantages_by_colour(sides):
         records += side_records
         advantages += [result - means[colour]] * len(side_records)
     return records, advantages
-
-
-class RandomOpening:
-    """Wraps a player so its first `moves` moves of the game are chosen at
-    random (by the eye-aware random player), then it plays as usual: test
-    games between deterministic networks then cover many positions."""
-
-    def __init__(self, player, moves, seed):
-        self.player = player
-        self.moves = moves
-        self.random = EyeAwareRandomPlayer(seed)
-
-    def __call__(self, game):
-        if len(game.moves) < 2 * self.moves:
-            return self.random(game)
-        return self.player(game)
 
 
 def win_rates(network, make_opponent, games, size, komi, seed, opening=0):
