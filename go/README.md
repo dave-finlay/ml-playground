@@ -318,6 +318,43 @@ closer game, and a pool of 150 mostly old, easy snapshots. Nothing stops
 the drift, which is the case for gating: keep a champion and only
 replace it when a challenger clearly beats it.
 
+### A ladder of champions
+
+`ladder.py` stops self-play drifting by keeping its opponents fixed
+until the learner has clearly beaten them. The champion starts as the
+`--init` network and the learner as a copy. Each batch, the learner
+plays the current champion (half the games) or a randomly chosen
+earlier champion, with only its own moves trained on (per-colour
+baseline, or a critic with `--value`). Every 50 batches it plays the
+champion at the gate, 400 games with both taking their likeliest moves
+and random two-move openings; at 55% or more it's promoted, becoming
+the new champion and the next rung, `champion-N.pt` in `--dir`, with
+`ladder.csv` logging each promotion. Its defaults are steadier than
+`selfplay.py`'s: learning rate 0.0003 and entropy bonus 0.05.
+
+```sh
+uv run python go/ladder.py --init go/runs/komi.pt --komi 7.5 --value \
+    --batches 1000 --seed 1 --dir go/runs/ladder-komi
+```
+
+From `komi.pt` (1000 batches, about 7 minutes) it made no promotions:
+the gate results stayed between 45% and 54.5% (53% to 54.5% in the last
+three gates). Meanwhile the learner's share of training games rose from
+56% to 88%. The champions sample their moves in training games (for
+variety), which makes them much weaker than at the gate, where they
+take their likeliest moves: the learner learned to exploit a noisy
+champion's mistakes, which barely helped against the real one. The
+ladder did its job, refusing to promote a learner that wasn't better.
+The fix to try is to have training opponents play as at the gate
+(likeliest moves, random openings for variety), so training optimizes
+what the gate measures.
+
+Dave on `komi.pt`: he can beat it as Black, but any simple mistake
+loses, and as White it's almost impossible to win. That fits 5 × 5:
+perfect Black play wins the whole board, by 17.5 even after komi 7.5, so
+against strong enough Black play White is lost from the start. 7 × 7,
+believed balanced at a komi of about 9, would be the fairer test.
+
 ### Carrying a run on
 
 With `--save go/runs/NAME.pt`, a resume file `go/runs/NAME-resume.pt` is
