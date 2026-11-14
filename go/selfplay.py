@@ -30,6 +30,13 @@ Run from the repo root:
 
     uv run python go/selfplay.py --init go/runs/eye-aware-5x5-seed1.pt --seed 1
     uv run python go/selfplay.py --batches 300 --save go/runs/selfplay.pt
+    uv run python go/selfplay.py --resume go/runs/selfplay-resume.pt --batches 1000
+
+With --save, a resume file is written beside the network at every test;
+--resume carries the run on from there exactly as if it had never
+stopped (the network, the optimizer's running averages, the pool of past
+copies, the best so far and the random number generators all carry
+over).
 """
 
 import argparse
@@ -216,34 +223,154 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=None, help="random seed")
     parser.add_argument(
+        "--resume",
+        default=None,
+        help="carry on a run from its resume file (written beside --save) up to "
+        "--batches in total, with its settings; only --batches and --save may "
+        "be given with it",
+    )
+    parser.add_argument(
         "--save",
         default=None,
         help="where to save the best network tested (its last version goes "
-        "beside it, with -last added to the name)",
+        "beside it, with -last added to the name, and a resume file with -resume)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.resume:
+        allowed = {"resume", "batches", "save", "help"}
+        changed = [
+            "--" + action.dest.replace("_", "-")
+            for action in parser._actions
+            if action.dest not in allowed
+            and getattr(args, action.dest) != parser.get_default(action.dest)
+        ]
+        if changed:
+            parser.error(
+                "--resume carries on with the saved settings: drop " + " ".join(changed)
+            )
+    return args
+
+
+def resume_path(save):
+    """Where the resume file for a run saved at save goes."""
+    root, extension = os.path.splitext(save)
+    return f"{root}-resume{extension or '.pt'}"
+
+
+def network_from(saved):
+    """A network from a {"settings", "weights"} dict."""
+    network = PolicyNetwork(**saved["settings"])
+    network.load_state_dict(saved["weights"])
+    return network
+
+
+def save_networks(save, network, best, batch):
+    """Save the best network tested to save, and network (the last) beside
+    it with -last added to the name."""
+    os.makedirs(os.path.dirname(save) or ".", exist_ok=True)
+    root, extension = os.path.splitext(save)
+    last = f"{root}-last{extension or '.pt'}"
+    save_network(last, network, {"batch": batch})
+    best_network = network_from(
+        {"settings": network.settings(), "weights": best["weights"]}
+    )
+    save_network(save, best_network, {"batch": best["batch"]})
+    return last
 
 
 def main():
     args = parse_args()
-    seed = args.seed if args.seed is not None else int(time.time())
-    torch.manual_seed(seed)
+    if args.resume:
+        state = torch.load(args.resume, weights_only=False)
+        settings = state["settings"]
+        if args.batches <= state["batch"]:
+            raise SystemExit(
+                f"selfplay.py: error: {args.resume} is already at batch "
+                f"{state['batch']}; give --batches more than that"
+            )
+        args = argparse.Namespace(
+            **{
+                **settings,
+                "batches": args.batches,
+                "resume": args.resume,
+                "save": args.save or state["save"],
+            }
+        )
+        seed = state["seed"]
+    else:
+        state = None
+        seed = args.seed if args.seed is not None else int(time.time())
+        torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     pick = random.Random(seed)
-    if args.init:
-        network = load_network(args.init)
-        network.train()
+
+    if state:
+        network = network_from(state["network"])
+        benchmark = network_from(state["benchmark"]) if state["benchmark"] else None
+        if benchmark is not None:
+            benchmark.eval()
     else:
-        network = PolicyNetwork(args.size)
-    if args.value and not network.has_value:
-        network = with_value_head(network)
-    benchmark_path = args.benchmark or args.init
-    benchmark = load_network(benchmark_path) if benchmark_path else None
+        if args.init:
+            network = load_network(args.init)
+            network.train()
+        else:
+            network = PolicyNetwork(args.size)
+        if args.value and not network.has_value:
+            network = with_value_head(network)
+        benchmark_path = args.benchmark or args.init
+        benchmark = load_network(benchmark_path) if benchmark_path else None
     optimizer = torch.optim.Adam(network.parameters(), lr=args.learning_rate)
     pool = [copy.deepcopy(network).eval()]
+    best = {"score": -1.0, "batch": 0, "weights": copy.deepcopy(network.state_dict())}
+    first_batch = 1
+    if state:
+        optimizer.load_state_dict(state["optimizer"])
+        pool = []
+        for weights in state["pool"]:
+            past = network_from({"settings": network.settings(), "weights": weights})
+            pool.append(past.eval())
+        best = state["best"]
+        rng.bit_generator.state = state["rng"]
+        pick.setstate(state["pick"])
+        torch.set_rng_state(state["torch"])
+        first_batch = state["batch"] + 1
     eval_seed = seed + 1_000_003
 
-    best = {"score": -1.0, "batch": 0, "weights": copy.deepcopy(network.state_dict())}
+    def write_resume(batch):
+        """Save everything needed to carry on exactly from after batch."""
+        if not args.save:
+            return
+        os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
+        settings = {
+            k: v
+            for k, v in vars(args).items()
+            if k not in ("batches", "resume", "save")
+        }
+        torch.save(
+            {
+                "settings": settings,
+                "seed": seed,
+                "batch": batch,
+                "save": args.save,
+                "network": {
+                    "settings": network.settings(),
+                    "weights": network.state_dict(),
+                },
+                "benchmark": None
+                if benchmark is None
+                else {
+                    "settings": benchmark.settings(),
+                    "weights": benchmark.state_dict(),
+                },
+                "optimizer": optimizer.state_dict(),
+                "pool": [past.state_dict() for past in pool],
+                "best": best,
+                "rng": rng.bit_generator.state,
+                "pick": pick.getstate(),
+                "torch": torch.get_rng_state(),
+            },
+            resume_path(args.save),
+        )
 
     def test(label, batch=0):
         """Print the yardstick win rates, and keep the network if it scores
@@ -279,14 +406,21 @@ def main():
         print(line)
 
     print("Tests: win rates as Black / as White, always taking the likeliest move")
-    test("Start")
+    if state:
+        print(
+            f"Resuming {args.resume} after batch {state['batch']} (best so far: "
+            f"batch {best['batch']}, {100 * best['score']:.0f}%), to batch "
+            f"{args.batches}"
+        )
+    else:
+        test("Start")
     print(
         f"{'batch':>5}  {'games':>6}  {'Black won':>9}  {'length':>6}  "
         f"{'entropy':>7}  pool"
         + ("  value loss, sign right" if network.has_value else "")
     )
     start = time.perf_counter()
-    for batch in range(1, args.batches + 1):
+    for batch in range(first_batch, args.batches + 1):
         sides, black_wins, lengths = [], [], []
         for i in range(args.games):
             colour = BLACK if (batch + i) % 2 else WHITE
@@ -330,18 +464,17 @@ def main():
             )
         if batch % args.eval_every == 0 or batch == args.batches:
             test(f"      batch {batch}", batch)
+            write_resume(batch)
     print(
         f"\nBest: batch {best['batch']}, scoring {100 * best['score']:.0f}% "
         f"({time.perf_counter() - start:.0f} s of training)"
     )
     if args.save:
-        os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
-        root, extension = os.path.splitext(args.save)
-        last = f"{root}-last{extension or '.pt'}"
-        save_network(last, network, {"batch": args.batches})
-        network.load_state_dict(best["weights"])
-        save_network(args.save, network, {"batch": best["batch"]})
-        print(f"Saved the best to {args.save} and the last to {last}")
+        last = save_networks(args.save, network, best, args.batches)
+        print(
+            f"Saved the best to {args.save}, the last to {last}, and what's "
+            f"needed to carry on to {resume_path(args.save)}"
+        )
 
 
 if __name__ == "__main__":

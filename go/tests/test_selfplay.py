@@ -1,6 +1,8 @@
 """Tests for selfplay.py: self-play games, per-colour baselines and the
 test harness."""
 
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -11,6 +13,7 @@ from policy import PolicyNetwork, encode, legal_mask, policy_gradient_loss
 from selfplay import (
     RandomOpening,
     advantages_by_colour,
+    main,
     moves_and_results,
     play_training_game,
     win_rates,
@@ -86,3 +89,55 @@ def test_moves_and_results_label_each_move_with_its_sides_result():
     a, b = (None, None, 1), (None, None, 2)
     records, results = moves_and_results([([a, a], BLACK, 1.0), ([b], WHITE, -1.0)])
     assert records == [a, a, b] and results == [1.0, 1.0, -1.0]
+
+
+def run(monkeypatch, capsys, *args):
+    """Run selfplay.py's main with these command-line arguments."""
+    monkeypatch.setattr(sys, "argv", ["selfplay.py", *map(str, args)])
+    main()
+    return capsys.readouterr().out
+
+
+SMALL = [
+    "--size",
+    5,
+    "--value",
+    "--seed",
+    3,
+    "--games",
+    6,
+    "--eval-every",
+    2,
+    "--eval-games",
+    2,
+    "--pool-every",
+    1,
+]
+
+
+def test_a_resumed_run_ends_exactly_like_an_uninterrupted_one(
+    tmp_path, monkeypatch, capsys
+):
+    straight, split = tmp_path / "straight.pt", tmp_path / "split.pt"
+    run(monkeypatch, capsys, *SMALL, "--batches", 4, "--save", straight)
+    run(monkeypatch, capsys, *SMALL, "--batches", 2, "--save", split)
+    out = run(
+        monkeypatch, capsys, "--resume", tmp_path / "split-resume.pt", "--batches", 4
+    )
+    assert "Resuming" in out and "after batch 2" in out
+    a = torch.load(tmp_path / "straight-last.pt", weights_only=True)["weights"]
+    b = torch.load(tmp_path / "split-last.pt", weights_only=True)["weights"]
+    assert all(torch.equal(a[k], b[k]) for k in a)
+
+
+def test_resume_refuses_changed_settings_and_finished_runs(
+    tmp_path, monkeypatch, capsys
+):
+    saved = tmp_path / "run.pt"
+    run(monkeypatch, capsys, *SMALL, "--batches", 2, "--save", saved)
+    resume = tmp_path / "run-resume.pt"
+    with pytest.raises(SystemExit):
+        run(monkeypatch, capsys, "--resume", resume, "--batches", 4, "--games", 8)
+    assert "drop --games" in capsys.readouterr().err
+    with pytest.raises(SystemExit, match="already at batch 2"):
+        run(monkeypatch, capsys, "--resume", resume, "--batches", 2)

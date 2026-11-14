@@ -186,6 +186,27 @@ Black / as White (the starting network against itself scores 52% /
 - These are single runs with noisy tests (50 games per colour, roughly
   ±7%).
 
+### Carrying a run on
+
+With `--save go/runs/NAME.pt`, a resume file `go/runs/NAME-resume.pt` is
+written beside the networks at every test. `--resume` carries the run
+on from it, up to `--batches` in total, exactly as if it had never
+stopped: the network, the optimizer's running averages, the pool of past
+copies, the best version so far and the random number generators all
+carry over, so 300 batches then a resume to 1000 ends with the same
+network as 1000 batches in one go. It keeps the run's settings (only
+`--batches` and `--save` may be given with it), and without `--save` it
+keeps writing to the same files.
+
+```sh
+uv run python go/selfplay.py --init go/runs/eye-aware-5x5-seed1.pt --batches 300 --seed 1 --value --save go/runs/value.pt
+uv run python go/selfplay.py --resume go/runs/value-resume.pt --batches 1000
+```
+
+To start a new run from a saved network instead (fresh optimizer and
+pool, new settings allowed), use `--init` with the `-last` file, and
+`--benchmark` to keep testing against the same yardstick.
+
 ### A critic (value head)
 
 With `--value`, the network also has a value head: from the same
