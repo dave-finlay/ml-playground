@@ -259,6 +259,65 @@ games are mostly lost whatever it does, a weak signal; komi (or the
 more balanced 7 × 7 board, where the fair komi is believed to be about
 9) would give White's moves a real win/loss signal.
 
+### Komi
+
+With no komi, Black wins most games between equals (and perfect play
+wins the whole 5 × 5 board for Black), so White's training games are
+mostly lost whatever it plays: a weak signal for White's moves. Komi
+7.5 balances things: eye-aware random players split 49% / 51%, and
+`value-2000.pt` playing itself wins 58% as Black instead of about 70%.
+
+With komi the same position is worth 7.5 more points to White, so the
+network needs to know who's to move. `PolicyNetwork(colour=True)` takes
+a fourth input plane, all 1s when Black is to move and all 0s for White
+(as AlphaGo Zero does). `selfplay.py` adds the plane whenever komi isn't
+0 (and `learn.py` builds networks with it): an existing network gains it
+with its first-layer weights for the plane at zero, so it plays exactly
+as before until training puts the plane to use. Saved networks record
+their komi, and `play.py` uses it by default (`--komi` overrides it;
+networks trained with different komi need an explicit choice).
+
+```sh
+uv run python go/selfplay.py --init go/runs/value-2000-last.pt --benchmark go/runs/value-2000.pt \
+    --value --komi 7.5 --batches 500 --seed 1 --save go/runs/komi.pt
+uv run python go/play.py --window --black human --white learned --model go/runs/komi.pt
+```
+
+Training 500 batches like that (about 4 minutes), its tests against
+`value-2000.pt` under komi 7.5 rose from 46% / 36% (as Black / as White)
+to 66% / 54%, still improving at the end; Black's share of training
+games fell from about 70% to 62%. Head to head under komi 7.5 (600
+games):
+
+| | as Black | as White | overall |
+|---|---|---|---|
+| `komi.pt` against `value-2000.pt` | 64% | 62% | 63% |
+| `komi.pt` against itself | Black wins 52%, White 48% | | |
+
+It plays both colours about equally well now (before, about 80% as
+Black and 50% as White against the previous network), and the game is
+balanced. Its entropy fell faster than in earlier runs (0.96 to 0.74),
+worth watching in longer ones.
+
+Against Dave, `komi.pt` as White lost by only 1.5 points (earlier
+networks lost all their stones as White), and as Black it took the
+whole board three times out of three, komi or not.
+
+Resumed to 1500 batches, though, it stopped improving: its best test
+stayed at batch 500 (so `komi-1500.pt` is the same network as
+`komi.pt`), its tests wandered between 40% and 62% against
+`value-2000.pt`, and head to head (600 games, komi 7.5) the batch-1500
+network split 50% with `komi.pt` but won only 48% against `value-2000.pt`
+(where `komi.pt` won 63%). It drifted to a different style rather than
+a better one: Black's share of training games swung from 81% down to
+30% as the colours' play kept overtaking each other, entropy fell to
+about 0.52 to 0.70, and the critic's predictions worsened. Likely
+causes: a learning rate too high for fine improvement (noisy REINFORCE
+steps jostle a good policy around), an entropy bonus too weak for a
+closer game, and a pool of 150 mostly old, easy snapshots. Nothing stops
+the drift, which is the case for gating: keep a champion and only
+replace it when a challenger clearly beats it.
+
 ### Carrying a run on
 
 With `--save go/runs/NAME.pt`, a resume file `go/runs/NAME-resume.pt` is

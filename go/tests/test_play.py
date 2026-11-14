@@ -98,3 +98,60 @@ def test_random_opening_makes_the_first_moves_random():
         )
     assert game.pass_move not in game.moves[::2]
     assert always_pass(game) == game.pass_move  # then it plays as itself
+
+
+def test_play_uses_the_komi_the_network_was_trained_with(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "komi.pt"
+    save_network(
+        path, PolicyNetwork(5, channels=8, layers=1, colour=True), {"komi": 7.5}
+    )
+    out = run(
+        monkeypatch,
+        capsys,
+        "--black",
+        "learned",
+        "--white",
+        "eye-aware",
+        "--model",
+        path,
+        "--games",
+        2,
+    )
+    assert "komi 7.5" in out
+    out = run(
+        monkeypatch,
+        capsys,
+        "--black",
+        "learned",
+        "--white",
+        "eye-aware",
+        "--model",
+        path,
+        "--games",
+        2,
+        "--komi",
+        0,
+    )
+    assert "komi 0" in out
+
+
+def test_networks_trained_with_different_komi_need_a_choice(
+    tmp_path, monkeypatch, capsys
+):
+    a, b = tmp_path / "a.pt", tmp_path / "b.pt"
+    save_network(a, PolicyNetwork(5, channels=8, layers=1), {"komi": 7.5})
+    save_network(b, PolicyNetwork(5, channels=8, layers=1), {"komi": 0.0})
+    with pytest.raises(SystemExit):
+        run(
+            monkeypatch,
+            capsys,
+            "--black",
+            "learned",
+            "--white",
+            "learned",
+            "--black-model",
+            a,
+            "--white-model",
+            b,
+        )
+    assert "different komi" in capsys.readouterr().err

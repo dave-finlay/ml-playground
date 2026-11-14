@@ -141,3 +141,16 @@ def test_resume_refuses_changed_settings_and_finished_runs(
     assert "drop --games" in capsys.readouterr().err
     with pytest.raises(SystemExit, match="already at batch 2"):
         run(monkeypatch, capsys, "--resume", resume, "--batches", 2)
+
+
+def test_self_play_with_komi_adds_a_colour_plane_and_records_the_komi(
+    tmp_path, monkeypatch, capsys
+):
+    from policy import load_network, saved_komi
+
+    saved = tmp_path / "komi.pt"
+    out = run(
+        monkeypatch, capsys, *SMALL, "--batches", 2, "--komi", 7.5, "--save", saved
+    )
+    assert "Adding a colour plane" in out
+    assert load_network(saved).has_colour and saved_komi(saved) == 7.5

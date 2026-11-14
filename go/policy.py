@@ -17,18 +17,21 @@ import numpy as np
 import torch
 from torch import nn
 
-from game import EMPTY, other
+from game import BLACK, EMPTY, other
 
 
-def encode(game):
+def encode(game, colour=False):
     """The board as the network sees it: an array of shape (3, size, size)
     with 1s marking the mover's stones, the opponent's stones, and the
-    empty points."""
+    empty points. With colour, a fourth plane says who's to move: all 1s
+    for Black, all 0s for White (with komi, the same position is worth
+    more to White)."""
     board = np.array(game.board).reshape(game.size, game.size)
     mover = game.to_play
-    return np.stack([board == mover, board == other(mover), board == EMPTY]).astype(
-        np.float32
-    )
+    planes = [board == mover, board == other(mover), board == EMPTY]
+    if colour:
+        planes.append(np.full_like(board, mover == BLACK, dtype=bool))
+    return np.stack(planes).astype(np.float32)
 
 
 def legal_mask(game):
@@ -51,18 +54,20 @@ class PolicyNetwork(nn.Module):
     passing. channels is the width of each convolution, layers how many
     there are.
 
-    With value, it also has a value head (a critic): from the same
+    With colour, it takes a fourth input plane saying who's to move (see
+    encode). With value, it also has a value head (a critic): from the same
     convolutions, it averages each feature over the board, and a linear
     layer and tanh give V, the expected result for the player to move,
     from -1 (a sure loss) to +1 (a sure win). heads() returns both.
     """
 
-    def __init__(self, size, channels=32, layers=3, value=False):
+    def __init__(self, size, channels=32, layers=3, value=False, colour=False):
         super().__init__()
         self.size, self.channels, self.layers = size, channels, layers
         self.has_value = value
+        self.has_colour = colour
         convolutions = []
-        width = 3
+        width = 4 if colour else 3
         for _ in range(layers):
             convolutions += [nn.Conv2d(width, channels, 3, padding=1), nn.ReLU()]
             width = channels
@@ -96,16 +101,41 @@ class PolicyNetwork(nn.Module):
             "channels": self.channels,
             "layers": self.layers,
             "value": self.has_value,
+            "colour": self.has_colour,
         }
 
 
-def with_value_head(network):
-    """A copy of network with a value head: its convolutions and move
-    scores unchanged (so it chooses moves exactly as before), and a new,
-    untrained value head if it had none."""
-    copy = PolicyNetwork(**{**network.settings(), "value": True})
-    copy.load_state_dict(network.state_dict(), strict=False)
+def upgraded(network, value=None, colour=None):
+    """A copy of network gaining a value head (value) or a colour input
+    plane (colour), choosing moves exactly as before: a new value head
+    starts untrained, and the first convolution's weights for a new
+    colour plane start at zero, so the plane has no effect until
+    training gives it one."""
+    settings = network.settings()
+    if value is not None:
+        settings["value"] = value
+    if colour is not None:
+        settings["colour"] = colour
+    copy = PolicyNetwork(**settings)
+    weights = dict(network.state_dict())
+    first = "body.0.weight"
+    old, new = weights[first], copy.state_dict()[first]
+    if old.shape != new.shape:  # adding the colour plane
+        grown = torch.zeros_like(new)
+        grown[:, : old.shape[1]] = old
+        weights[first] = grown
+    copy.load_state_dict(weights, strict=False)
     return copy
+
+
+def with_value_head(network):
+    """A copy of network with a value head (see upgraded)."""
+    return upgraded(network, value=True)
+
+
+def saved_komi(path):
+    """The komi a saved network was trained with, or None if not recorded."""
+    return torch.load(path, weights_only=True).get("komi")
 
 
 def save_network(path, network, extra=None):
@@ -142,7 +172,7 @@ class NetworkPlayer:
         self.record = record
 
     def __call__(self, game):
-        board, mask = encode(game), legal_mask(game)
+        board, mask = encode(game, self.network.has_colour), legal_mask(game)
         with torch.no_grad():
             logits = self.network(torch.from_numpy(board)[None])[0]
             logits = masked_logits(logits, torch.from_numpy(mask))

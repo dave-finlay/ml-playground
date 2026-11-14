@@ -17,6 +17,8 @@ from policy import (
     legal_mask,
     load_network,
     save_network,
+    saved_komi,
+    upgraded,
     with_value_head,
 )
 
@@ -125,6 +127,7 @@ def test_save_and_load(tmp_path):
         "channels": 8,
         "layers": 2,
         "value": False,
+        "colour": False,
     }
 
 
@@ -195,3 +198,41 @@ def test_a_detached_critic_trains_only_the_value_head():
     values.sum().backward()
     assert network.value_score.weight.grad is not None
     assert all(p.grad is None or not p.grad.any() for p in network.body.parameters())
+
+
+def test_colour_plane_says_who_is_to_move():
+    game = Game(3)
+    assert encode(game, colour=True).shape == (4, 3, 3)
+    assert encode(game, colour=True)[3].min() == 1  # Black to move
+    game.play(0)
+    assert encode(game, colour=True)[3].max() == 0  # White to move
+    assert encode(game).shape == (3, 3, 3)
+
+
+def test_adding_a_colour_plane_keeps_the_move_choices():
+    torch.manual_seed(7)
+    network = PolicyNetwork(5, channels=8, layers=2, value=True)
+    coloured = upgraded(network, colour=True)
+    game = Game(5)
+    game.play(12)
+    old = torch.from_numpy(encode(game))[None]
+    new = torch.from_numpy(encode(game, colour=True))[None]
+    with torch.no_grad():
+        old_scores, old_value = network.heads(old)
+        new_scores, new_value = coloured.heads(new)
+    assert torch.allclose(old_scores, new_scores)
+    assert torch.allclose(old_value, new_value)
+    assert coloured.has_colour and coloured.settings()["colour"]
+
+
+def test_a_network_with_a_colour_plane_plays(tmp_path):
+    network = PolicyNetwork(5, channels=8, layers=1, colour=True)
+    game = play_game(Game(5, komi=7.5), NetworkPlayer(network), EyeAwareRandomPlayer(1))
+    assert game.over
+    path = tmp_path / "coloured.pt"
+    save_network(path, network, {"komi": 7.5})
+    assert load_network(path).has_colour
+    assert saved_komi(path) == 7.5
+    old = tmp_path / "old.pt"
+    save_network(old, PolicyNetwork(5, channels=8, layers=1))
+    assert saved_komi(old) is None

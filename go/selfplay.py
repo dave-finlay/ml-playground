@@ -59,6 +59,7 @@ from policy import (
     load_network,
     policy_gradient_loss,
     save_network,
+    upgraded,
     with_value_head,
 )
 
@@ -248,17 +249,17 @@ def network_from(saved):
     return network
 
 
-def save_networks(save, network, best, batch):
+def save_networks(save, network, best, batch, komi):
     """Save the best network tested to save, and network (the last) beside
-    it with -last added to the name."""
+    it with -last added to the name, recording the komi trained with."""
     os.makedirs(os.path.dirname(save) or ".", exist_ok=True)
     root, extension = os.path.splitext(save)
     last = f"{root}-last{extension or '.pt'}"
-    save_network(last, network, {"batch": batch})
+    save_network(last, network, {"batch": batch, "komi": komi})
     best_network = network_from(
         {"settings": network.settings(), "weights": best["weights"]}
     )
-    save_network(save, best_network, {"batch": best["batch"]})
+    save_network(save, best_network, {"batch": best["batch"], "komi": komi})
     return last
 
 
@@ -301,6 +302,12 @@ def main():
             network = PolicyNetwork(args.size)
         if args.value and not network.has_value:
             network = with_value_head(network)
+        if args.komi and not network.has_colour:
+            network = upgraded(network, colour=True)
+            print(
+                f"Adding a colour plane: with komi {args.komi:g}, a position's "
+                "value depends on who's to move"
+            )
         benchmark_path = args.benchmark or args.init
         benchmark = load_network(benchmark_path) if benchmark_path else None
     optimizer = torch.optim.Adam(network.parameters(), lr=args.learning_rate)
@@ -454,7 +461,7 @@ def main():
         f"({time.perf_counter() - start:.0f} s of training)"
     )
     if args.save:
-        last = save_networks(args.save, network, best, args.batches)
+        last = save_networks(args.save, network, best, args.batches, args.komi)
         print(
             f"Saved the best to {args.save}, the last to {last}, and what's "
             f"needed to carry on to {resume_path(args.save)}"

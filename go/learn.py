@@ -139,7 +139,10 @@ def main():
     seed = args.seed if args.seed is not None else int(time.time())
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    network = PolicyNetwork(args.size, args.channels, args.layers)
+    # With komi, the network needs to know who's to move (see encode).
+    network = PolicyNetwork(
+        args.size, args.channels, args.layers, colour=args.komi != 0
+    )
     optimizer = torch.optim.Adam(network.parameters(), lr=args.learning_rate)
     opponent_class = OPPONENTS[args.opponent]
     opponent = opponent_class(seed + 1)
@@ -201,7 +204,11 @@ def main():
     if args.save:
         network.load_state_dict(best)
         os.makedirs(os.path.dirname(args.save) or ".", exist_ok=True)
-        save_network(args.save, network, {"batch": best_batch, "win_rate": best_rate})
+        save_network(
+            args.save,
+            network,
+            {"batch": best_batch, "win_rate": best_rate, "komi": args.komi},
+        )
         print(f"Saved to {args.save}")
 
 

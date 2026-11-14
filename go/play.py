@@ -205,7 +205,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--size", type=int, default=5, help="board size (default: 5)")
     parser.add_argument(
-        "--komi", type=float, default=0.0, help="points White gets (default: 0)"
+        "--komi",
+        type=float,
+        default=None,
+        help="points White gets (default: the komi a learned player was "
+        "trained with, otherwise 0)",
     )
     parser.add_argument(
         "--max-moves",
@@ -289,7 +293,27 @@ def parse_args():
         parser.error("--opening is for computer players, not human ones")
     if args.swap and (args.window or args.watch):
         parser.error("--swap is for many games, not --window or --watch")
+    if args.komi is None:
+        args.komi = models_komi(parser, args)
     return args
+
+
+def models_komi(parser, args):
+    """The komi the learned players' networks were trained with (0 if none
+    recorded one); an error if they disagree."""
+    from policy import saved_komi  # needs PyTorch
+
+    models = []
+    for colour in ("black", "white"):
+        if getattr(args, colour) == LEARNED:
+            models.append(getattr(args, f"{colour}_model") or args.model)
+    komis = {saved_komi(m) for m in models} - {None}
+    if len(komis) > 1:
+        parser.error(
+            f"the networks were trained with different komi ({sorted(komis)}); "
+            "choose one with --komi"
+        )
+    return komis.pop() if komis else 0.0
 
 
 def describe_player(name, model):
