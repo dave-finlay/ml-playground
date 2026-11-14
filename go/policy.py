@@ -120,3 +120,23 @@ class NetworkPlayer:
         if self.record is not None:
             self.record.append((board, mask, move))
         return move
+
+
+def policy_gradient_loss(network, records, advantages, entropy_bonus=0.0):
+    """The REINFORCE loss for recorded moves: minus the mean over them of
+    advantage * log pi(move | board), less entropy_bonus times the mean
+    entropy of the policy (a reward for keeping its probabilities spread
+    out, so it keeps exploring).
+
+    records are (board, mask, move) tuples as NetworkPlayer records them,
+    and advantages one number per record. Returns (loss, mean entropy).
+    """
+    boards = torch.from_numpy(np.stack([board for board, _, _ in records]))
+    masks = torch.from_numpy(np.stack([mask for _, mask, _ in records]))
+    chosen = torch.tensor([move for _, _, move in records])
+    log_probs = torch.log_softmax(masked_logits(network(boards), masks), dim=1)
+    taken = log_probs[torch.arange(len(records)), chosen]
+    weights = torch.tensor(np.asarray(advantages), dtype=torch.float32)
+    entropy = -(log_probs.exp() * log_probs.clamp(min=-30)).sum(dim=1).mean()
+    loss = -(weights * taken).mean() - entropy_bonus * entropy
+    return loss, float(entropy.detach())

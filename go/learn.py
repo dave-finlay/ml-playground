@@ -33,7 +33,7 @@ import torch
 from game import BLACK, WHITE, Game
 from play import play_game
 from players import EyeAwareRandomPlayer, RandomPlayer
-from policy import NetworkPlayer, PolicyNetwork, masked_logits, save_network
+from policy import NetworkPlayer, PolicyNetwork, policy_gradient_loss, save_network
 
 OPPONENTS = {"random": RandomPlayer, "eye-aware": EyeAwareRandomPlayer}
 
@@ -68,22 +68,11 @@ def reinforce_loss(network, moves, results):
     Also returns the policy's mean entropy over those moves."""
     results = np.array(results)
     advantages = results - results.mean()
-    boards, masks, chosen, weights = [], [], [], []
+    records, weights = [], []
     for record, advantage in zip(moves, advantages, strict=True):
-        for board, mask, move in record:
-            boards.append(board)
-            masks.append(mask)
-            chosen.append(move)
-            weights.append(advantage)
-    boards = torch.from_numpy(np.stack(boards))
-    masks = torch.from_numpy(np.stack(masks))
-    logits = masked_logits(network(boards), masks)
-    log_probs = torch.log_softmax(logits, dim=1)
-    taken = log_probs[torch.arange(len(chosen)), torch.tensor(chosen)]
-    loss = -(torch.tensor(weights, dtype=torch.float32) * taken).mean()
-    probs = log_probs.exp()
-    entropy = -(probs * log_probs.clamp(min=-30)).sum(dim=1).mean()
-    return loss, float(entropy.detach())
+        records += record
+        weights += [advantage] * len(record)
+    return policy_gradient_loss(network, records, weights)
 
 
 def evaluate(network, opponent_class, games, size, komi, seed):

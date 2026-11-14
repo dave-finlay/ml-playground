@@ -135,6 +135,57 @@ Results on 5 × 5 (seed 1, komi 0):
 - Against itself (always its likeliest move) it plays the same game
   every time; Black wins by 12.
 
+## selfplay.py: learned against learned
+
+Against random players the network learns only what beats random
+players. In self-play its opponent improves with it. Each batch of 64
+games, the network plays either itself (both sides sampling, and both
+sides' moves trained on, each with its own side's result) or, half the
+time, a past copy of itself from a pool (a snapshot is added every 10
+batches; only the current network's moves are trained on), alternating
+colours. Each move's advantage is its side's result less the average
+result of its colour in the batch, a separate baseline for Black and
+White: between equals Black wins most games, which would otherwise make
+every Black move look good. The loss is REINFORCE's, less a bonus for
+the policy's entropy (how spread out its move probabilities are).
+
+Self-play win rates mean nothing (it always plays its equal), so every
+50 batches (`--eval-every`) it's tested, always taking its likeliest
+move, against fixed yardsticks: the eye-aware player and the network it
+started from (`--init`, or another with `--benchmark`). Two
+deterministic networks would play the same game every time, so those
+test games open with 2 random moves per side. The best version tested
+is saved with `--save`, and the last beside it with `-last` added.
+
+```sh
+uv run python go/selfplay.py --init go/runs/eye-aware-5x5-seed1.pt --batches 300 --seed 1 --save go/runs/selfplay-5x5-seed1.pt
+uv run python go/play.py --window --black human --white learned --model go/runs/selfplay-5x5-seed1.pt
+```
+
+Starting from the network trained against eye-aware (seed 1, 300
+batches, about 130 s); win rates against that starting network, as
+Black / as White (the starting network against itself scores 52% /
+30%: Black's advantage is large between equals):
+
+| batch | no entropy bonus | bonus 0.01 | bonus 0.03 (the default) |
+|---|---|---|---|
+| 100 | 70% / 30% | 68% / 28% | 64% / 40% |
+| 200 | 72% / 52% | 68% / 48% | 76% / 42% |
+| 250 | 66% / 38% | 76% / 38% | 74% / 54% |
+| 300 | 40% / 28% | 62% / 26% | 74% / 52% |
+| entropy at 300 | 0.27 | 0.49 | 1.02 |
+
+- Without the bonus, self-play improved for about 200 batches and then
+  collapsed below where it started: its entropy fell from 0.79 to 0.27
+  as it narrowed into one style that beat its recent selves but lost to
+  its starting self. A bonus of 0.01 only delayed that.
+- With 0.03 the entropy held at about 1, and it kept improving: the
+  best version (batch 250) wins 64% on average against its starting
+  self, against 41% for the start against itself, and 96 to 100%
+  against eye-aware throughout.
+- These are single runs with noisy tests (50 games per colour, roughly
+  ±7%).
+
 ## Tests
 
 `uv run pytest` from the repo root runs them, with the other
