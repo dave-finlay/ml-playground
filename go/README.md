@@ -221,6 +221,44 @@ colour, but loses about half the time. After 300 batches the critic
 looked like no help; over 1000 it kept climbing, but the run without a
 critic hasn't been taken that far to compare.
 
+### Training longer, and outgrowing the yardstick
+
+Resumed from batch 1000 to 2000 (`--resume go/runs/value-resume.pt
+--batches 2000 --save go/runs/value-2000.pt`, about 9 minutes), the
+run's own tests against its starting network hovered around 76 to 80%
+from batch 1000 on, as if it had stopped improving. Head to head (600
+games, colours alternating, 2 random opening moves each) told a
+different story:
+
+| | as Black | as White | overall |
+|---|---|---|---|
+| `value-2000.pt` (best, batch 1820) against `value.pt` (batch 1000) | 81% | 51% | 66% |
+| `value-2000-last.pt` (batch 2000) against `value.pt` | 82% | 49% | 66% |
+| `value-2000.pt` against the start | 91% | 69% | 80% |
+| `value.pt` against the start, for comparison | 92% | 69% | 80.5% |
+
+- The extra 1000 batches made a real difference: the new network beats
+  the batch-1000 one two games in three, and wins half its games as
+  White against it playing Black.
+- The start network had become too weak a yardstick: both networks beat
+  it about 80% of the time, so progress above that didn't show. Tests
+  need a yardstick a little below the current strength, such as the
+  previous strong network (`--benchmark` on a fresh run), or a ladder
+  of champions where each clear winner becomes the next yardstick.
+- The "best" (picked from about 50 noisy tests, so flattered: the
+  winner's curse) and the last network score the same head to head.
+- Entropy drifted from about 1.03 to 0.87, still far from collapse; the
+  critic improved to predicting the winner 85 to 90% of the time.
+
+Against Dave (4 games), `value-2000.pt` won both its games as Black (by
+3 and 16) and was wiped out as White both times (losing all its
+stones). On 5 × 5 Black's advantage is enormous (perfect play wins the
+whole board for Black), so White is lost against good play anyway, but
+it should at least keep a group alive. With no komi, White's training
+games are mostly lost whatever it does, a weak signal; komi (or the
+more balanced 7 × 7 board, where the fair komi is believed to be about
+9) would give White's moves a real win/loss signal.
+
 ### Carrying a run on
 
 With `--save go/runs/NAME.pt`, a resume file `go/runs/NAME-resume.pt` is
