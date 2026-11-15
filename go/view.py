@@ -1,10 +1,12 @@
 """A pygame window showing a game of Go as it's played.
 
 play.py uses it with --window. The board is drawn wood-coloured with
-its grid, the stones, a red dot on the latest stone, and a caption with
-the move and the captures so far. When the game ends, each side's
-territory is marked with small squares of its colour and the caption
-gives the score.
+its grid, the stones and a red dot on the latest stone. The caption
+below shows whose turn it is (with a stone of their colour), saying so
+when the other side has just passed, the last few moves (passes
+included), and the captures so far or, on a person's turn, what to do.
+When the game ends, each side's territory is marked with small squares
+of its colour and the caption gives the score.
 
 While a game plays: space pauses and resumes, and closing the window
 (or Escape) stops it. When it's a person's turn (ask_move), they click
@@ -13,7 +15,7 @@ a point to play there, or press P to pass.
 
 import pygame
 
-from game import BLACK, COLUMNS, WHITE
+from game import BLACK, COLUMNS, WHITE, other
 
 COLOUR_NAMES = {BLACK: "Black", WHITE: "White"}
 
@@ -23,7 +25,9 @@ BLACK_STONE = (25, 25, 25)
 WHITE_STONE = (240, 240, 235)
 LAST_MOVE = (200, 30, 30)
 CAPTION = (30, 30, 30)
-CAPTION_HEIGHT = 56
+CAPTION_HEIGHT = 84  # three lines
+CAPTION_LINE = 24  # pixels from one caption line to the next
+RECENT_MOVES = 5  # moves listed in the caption
 
 
 def board_geometry(size, cell):
@@ -46,9 +50,44 @@ def star_points(size):
     return points
 
 
+def recent_moves(game, count=RECENT_MOVES):
+    """The last count moves, numbered, like "12 B C3 · 13 W pass"."""
+    moves = game.moves[-count:]
+    first = len(game.moves) - len(moves) + 1
+    # The last move was made by the player not to move; colours alternate.
+    colour = other(game.to_play) if len(moves) % 2 else game.to_play
+    parts = []
+    for number, move in enumerate(moves, first):
+        parts.append(f"{number} {COLOUR_NAMES[colour][0]} {game.name(move)}")
+        colour = other(colour)
+    return " · ".join(parts)
+
+
+def turn_caption(game, you=False, note=None):
+    """The caption during a game: whose turn it is ("(you)" for a person,
+    after "White passed." if the last move was a pass), the recent moves,
+    then note if given, else what a person can do, else the captures."""
+    turn = f"{COLOUR_NAMES[game.to_play]} to play" + (" (you)" if you else "")
+    passed = bool(game.moves) and game.moves[-1] == game.pass_move
+    if passed:
+        turn = f"{COLOUR_NAMES[other(game.to_play)]} passed. {turn}"
+    moves = f"Moves: {recent_moves(game)}" if game.moves else "No moves yet"
+    if note:
+        last = note
+    elif you and passed:
+        last = "Click a point, or P to pass too and end the game"
+    elif you:
+        last = "Click a point, or P to pass; capture dead stones first"
+    else:
+        black, white = game.captures[BLACK], game.captures[WHITE]
+        last = f"Captured so far: Black {black}, White {white}"
+    return f"{turn}\n{moves}\n{last}"
+
+
 def draw_board(surface, game, cell, last_move=None, caption="", final=False):
     """Draw game's position on surface: grid, coordinates, stones, a dot on
-    last_move (a point), the caption below, and with final, territory."""
+    last_move (a point), the caption below, and with final, territory.
+    Before the end, a stone of the colour to move starts the caption."""
     size = game.size
     margin, pixels = board_geometry(size, cell)
     surface.fill(BACKGROUND)
@@ -98,9 +137,16 @@ def draw_board(surface, game, cell, last_move=None, caption="", final=False):
             pygame.draw.rect(surface, LINE, square, 1)
 
     caption_font = pygame.font.SysFont(None, 26)
-    for i, line in enumerate(caption.split("\n")[:2]):
+    indent = 12
+    if caption and not final:
+        stone = (indent + 9, pixels + 6 + CAPTION_LINE // 2 - 3)
+        fill = BLACK_STONE if game.to_play == BLACK else WHITE_STONE
+        pygame.draw.circle(surface, fill, stone, 9)
+        pygame.draw.circle(surface, LINE, stone, 9, 1)
+    for i, line in enumerate(caption.split("\n")[:3]):
         text = caption_font.render(line, True, CAPTION)
-        surface.blit(text, (12, pixels + 6 + 24 * i))
+        x = indent + 26 if i == 0 and not final else indent
+        surface.blit(text, (x, pixels + 6 + CAPTION_LINE * i))
 
 
 class QuitGame(Exception):
@@ -160,11 +206,7 @@ class BoardView:
         pressed) instead."""
         if self.closed:
             raise QuitGame
-        colour = COLOUR_NAMES[game.to_play]
-        prompt = (
-            f"{colour} (you) to play: click a point, or P to pass\n"
-            "Capture dead stones before passing: the board scores as it stands"
-        )
+        prompt = turn_caption(game, you=True)
         last_move = (
             last_move
             if last_move is not None
@@ -188,9 +230,8 @@ class BoardView:
                 reason = game.why_illegal(point)
                 if reason is None:
                     return point
-                retry = (
-                    f"{game.name(point)} isn't allowed: {reason}\n"
-                    f"{colour} (you) to play: click a point, or P to pass"
+                retry = turn_caption(
+                    game, you=True, note=f"{game.name(point)} isn't allowed: {reason}"
                 )
                 draw_board(self.screen, game, self.cell, last_move, retry)
                 pygame.display.flip()

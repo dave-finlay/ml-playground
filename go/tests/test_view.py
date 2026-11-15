@@ -17,6 +17,8 @@ from view import (  # noqa: E402
     QuitGame,
     board_geometry,
     draw_board,
+    recent_moves,
+    turn_caption,
 )
 
 
@@ -129,3 +131,53 @@ def test_a_human_can_play_a_whole_game(capsys):
     assert game.over and game.passes_in_a_row == 2
     assert game.board.count(WHITE) > 0 and game.board.count(BLACK) == 0
     assert "White by" in capsys.readouterr().out
+
+
+def played(names, size=5):
+    game = Game(size)
+    for name in names:
+        game.play(
+            game.pass_move
+            if name == "pass"
+            else next(p for p in range(game.pass_move) if game.name(p) == name)
+        )
+    return game
+
+
+def test_recent_moves_number_and_colour_the_last_few():
+    game = played(["C3", "D3", "C2", "pass", "B4", "pass", "D2"])
+    assert recent_moves(game, 3) == "5 B B4 · 6 W pass · 7 B D2"
+    assert recent_moves(game, 10).startswith("1 B C3 · 2 W D3")
+
+
+def test_the_caption_says_when_the_other_side_passed():
+    game = played(["C3", "pass"])
+    turn, moves, last = turn_caption(game, you=True).split("\n")
+    assert turn == "White passed. Black to play (you)"
+    assert moves == "Moves: 1 B C3 · 2 W pass"
+    assert "pass too and end the game" in last
+
+
+def test_the_caption_otherwise_shows_whose_turn_and_the_captures():
+    game = played(["C3"])
+    turn, moves, last = turn_caption(game).split("\n")
+    assert turn == "White to play"
+    assert last.startswith("Captured so far")
+    assert turn_caption(Game(5)).split("\n")[1] == "No moves yet"
+    note = turn_caption(game, you=True, note="A1 isn't allowed").split("\n")[2]
+    assert note == "A1 isn't allowed"
+
+
+def test_record_prints_the_players_every_move_and_the_end(capsys):
+    pygame.init()
+    pygame.display.set_mode((10, 10))
+    pygame.event.clear()
+    for _ in range(150):
+        key(pygame.K_p)
+    game = Game(5, komi=7.5)
+    watch_in_window(game, "human", "eye-aware", seed=1, delay=0.0, record=True)
+    out = capsys.readouterr().out
+    assert out.startswith("Game on 5x5, komi 7.5: Black human, White eye-aware")
+    assert "  1. B pass" in out
+    assert f"{len(game.moves):3}. " in out
+    assert str(game) in out and "White by" in out

@@ -78,6 +78,7 @@ def test_without_an_opening_two_networks_repeat_one_game(
         (["--black", "learned"], "needs --model or --black-model"),
         (["--black-model", "x.pt"], "--black-model needs --black learned"),
         (["--window", "--black", "human", "--opening", "2"], "computer players"),
+        (["--record"], "--record is for --window games"),
         (["--watch", "--swap"], "--swap is for many games"),
     ],
 )

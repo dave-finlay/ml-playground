@@ -46,6 +46,15 @@ Three players so far:
   scores as it stands, with no removal of dead stones, so capture them
   before passing.
 
+Below the board, the window shows whose turn it is, with a stone of
+their colour (and "White passed." when the last move was a pass, so a
+pass doesn't look like nothing happening), the last five moves, passes
+included (`5 B B4 · 6 W pass`), and the captures so far, or on your
+turn what you can do. With `--record`, a game in the window is also
+printed at the console as it's played: the players and komi, each move
+(`14. W pass`, `15. B C5, capturing 1`), then the final position and
+the result, ready to paste or replay.
+
 `play.py` plays many games between two players and summarizes them, or
 shows one game move by move:
 
@@ -56,6 +65,7 @@ uv run python go/play.py --watch --seed 3                   # one game, move by 
 uv run python go/play.py --window --black eye-aware --white eye-aware
 uv run python go/play.py --window --black human --white eye-aware   # you play Black
 uv run python go/play.py --window --black random --white human      # you play White
+uv run python go/play.py --window --record --black human --white eye-aware  # and print the moves
 ```
 
 `--window` plays one game in a pygame window (`view.py`): the board with

@@ -9,6 +9,8 @@ Run from the repo root:
     uv run python go/play.py --black eye-aware --white eye-aware
     uv run python go/play.py --window --black eye-aware --white eye-aware
     uv run python go/play.py --window --black human --white eye-aware
+    uv run python go/play.py --window --record --black human --white guided \\
+        --model go/runs/komi.pt --simulations 100   # moves also printed
     uv run python go/play.py --window --black human --white learned \\
         --model go/runs/first.pt
     uv run python go/play.py --black learned --white learned --swap --opening 2 \\
@@ -63,6 +65,14 @@ def play_game(game, black, white, after_move=None):
     return game
 
 
+def record_move(game, move, mover, captured):
+    """after_move for --record: print the move as a numbered line, like
+    "12. B C3, capturing 2"."""
+    took = f", capturing {captured}" if captured else ""
+    colour = "B" if mover == BLACK else "W"
+    print(f"{len(game.moves):3}. {colour} {game.name(move)}{took}", flush=True)
+
+
 def print_move(game, move, mover, captured):
     """after_move for play_game: print the move and the board."""
     print(describe_move(game, move, mover, captured))
@@ -109,12 +119,14 @@ def watch_in_window(
     black_model=None,
     white_model=None,
     simulations=(400, 400),
+    record=False,
 ):
     """Play game in a pygame window between the players named (either may
     be "human", clicking in the window), pausing delay seconds after each
     computer move, then show the result with territory until a key is
-    pressed."""
-    from view import BoardView, QuitGame  # only needed with a window
+    pressed. With record, also print the game at the console as it's
+    played: the players, each move, and the final position and result."""
+    from view import BoardView, QuitGame, turn_caption  # only with a window
 
     view = BoardView(game.size)
     black = make_player(
@@ -132,17 +144,22 @@ def watch_in_window(
         for colour, name in ((BLACK, black_name), (WHITE, white_name))
         if name == HUMAN
     }
+    if record:
+        print(
+            f"Game on {game.size}x{game.size}, komi {game.komi:g}: Black "
+            f"{describe_player(black_name, black_model, simulations[0])}, White "
+            f"{describe_player(white_name, white_model, simulations[1])}",
+            flush=True,
+        )
     if BLACK not in humans:
-        view.show(game, caption="Black to play", seconds=delay)
+        view.show(game, caption=turn_caption(game), seconds=delay)
 
     def show_move(game, move, mover, captured):
-        line = describe_move(game, move, mover, captured)
-        tally = (
-            f"Captured so far: Black {game.captures[BLACK]}, "
-            f"White {game.captures[WHITE]}"
-        )
+        if record:
+            record_move(game, move, mover, captured)
         pause = 0.0 if mover in humans else delay
-        return view.show(game, move, f"{line}\n{tally}", seconds=pause)
+        caption = turn_caption(game, you=game.to_play in humans)
+        return view.show(game, move, caption, seconds=pause)
 
     with contextlib.suppress(QuitGame):  # the window closed on your turn
         play_game(game, black, white, after_move=show_move)
@@ -154,9 +171,13 @@ def watch_in_window(
             " (any key to close)"
         )
         view.finish(game, caption)
+        if record:
+            print(game)
         print(final_caption(game))
     else:
         view.close()
+        if record:
+            print(game)
         print(f"Stopped after {len(game.moves)} moves.")
 
 
@@ -271,6 +292,12 @@ def parse_args():
         help="play one game in a window (space pauses, Escape stops)",
     )
     parser.add_argument(
+        "--record",
+        action="store_true",
+        help="with --window, print the game at the console as it's played "
+        "(players, every move, the final position)",
+    )
+    parser.add_argument(
         "--delay",
         type=float,
         default=0.5,
@@ -335,6 +362,8 @@ def parse_args():
         parser.error("a human player needs --window (you play by clicking)")
     if args.opening and HUMAN in (args.black, args.white):
         parser.error("--opening is for computer players, not human ones")
+    if args.record and not args.window:
+        parser.error("--record is for --window games (--watch prints every move)")
     if args.swap and (args.window or args.watch):
         parser.error("--swap is for many games, not --window or --watch")
     searchers = {MCTS, GUIDED}
@@ -398,6 +427,7 @@ def main():
             black_model,
             white_model,
             (args.black_simulations, args.white_simulations),
+            args.record,
         )
         return
     black = make_player(
