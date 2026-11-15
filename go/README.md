@@ -458,9 +458,54 @@ simulations while the network plays at one fixed strength. With no
 learning, just the rules, random playouts and counting, 1000
 simulations beat the best network. (60 games give about ±6%.)
 
-The next step is to have the network guide the search: its policy to
-choose which moves to explore, and its value head instead of random
-playouts (as in AlphaZero).
+## guided.py: search guided by a network
+
+As in AlphaZero, the network does two jobs inside the search. Its
+policy gives each move a prior P, and selection uses PUCT instead of
+UCT, Q + 1.5 × P × √(parent visits) / (1 + visits), so simulations go to
+moves the network thinks are worth a look (Q is the move's average value
+so far). Its value head judges each new position directly instead of a
+random playout (a network without one falls back to playouts). When the
+search reaches a new position, the network evaluates it once: every
+legal move becomes a child with its prior, and the value is backed up
+the path with its sign flipping at each level. It plays the move it
+visited most. `play.py` has it as the `guided` player, with `--model`
+and `--simulations`; `--black-simulations` and `--white-simulations`
+give two searchers different budgets.
+
+```sh
+uv run python go/play.py --window --black human --white guided --model go/runs/komi.pt --simulations 100
+uv run python go/play.py --black guided --white learned --model go/runs/komi.pt --simulations 100 --swap --opening 2 --games 200
+```
+
+With `komi.pt` (komi 7.5, which `play.py` reads from the network):
+
+| guided search against... | as Black | as White | overall |
+|---|---|---|---|
+| `komi.pt` alone, 25 simulations (200 games) | 76% | 57% | 66.5% |
+| `komi.pt` alone, 100 simulations | 87% | 81% | 84% |
+| `komi.pt` alone, 400 simulations | 92% | 83% | 87.5% |
+| plain `mcts`, both 100 simulations (60 games) | 100% | 100% | 100% |
+| plain `mcts`, both 400 simulations | 93% | 93% | 93% |
+| plain `mcts` with 1000, guided with 25 | 67% | 40% | 53% |
+| plain `mcts` with 1000, guided with 100 | 73% | 50% | 62% |
+
+- A little lookahead goes a long way: 25 simulations (about 0.01 s a
+  move) make the network beat its unsearched self two games in three,
+  and 100 make it win 84%, as White too.
+- With the same budget, guidance makes search far stronger than random
+  exploration and playouts (100% and 93%); guided search with 25
+  simulations matches plain search with 1000, 40 times fewer.
+- Against Dave as Black (on 5 × 5, the winning side), guided search as
+  White with 100 simulations won 2 of 4 games (by 4.5 and 3.5, keeping a
+  living group), where `komi.pt` alone lost as White even at its best.
+  Its losses were total (every stone captured), at 400 simulations too:
+  more search explores the value head's misjudgements of life and death
+  more thoroughly rather than correcting them.
+- Next: AlphaZero's training loop, where self-play games are played by
+  this search and the network learns to imitate its choices (the visit
+  counts) and predict the results, so search and network improve each
+  other.
 
 ## Tests
 

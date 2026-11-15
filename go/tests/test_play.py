@@ -155,3 +155,40 @@ def test_networks_trained_with_different_komi_need_a_choice(
             b,
         )
     assert "different komi" in capsys.readouterr().err
+
+
+def test_each_searcher_can_have_its_own_simulations(two_networks, monkeypatch, capsys):
+    out = run(
+        monkeypatch,
+        capsys,
+        "--black",
+        "guided",
+        "--white",
+        "mcts",
+        "--black-model",
+        two_networks[0],
+        "--black-simulations",
+        5,
+        "--white-simulations",
+        7,
+        "--games",
+        2,
+        "--swap",
+        "--seed",
+        1,
+    )
+    assert "5 simulations" in out and "mcts (7 simulations)" in out
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (["--black", "guided"], "needs --model or --black-model"),
+        (["--black-simulations", "5"], "--black-simulations needs --black mcts"),
+        (["--simulations", "5"], "--simulations needs an mcts or guided"),
+    ],
+)
+def test_search_option_errors(args, message, monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        run(monkeypatch, capsys, *args)
+    assert message in capsys.readouterr().err
