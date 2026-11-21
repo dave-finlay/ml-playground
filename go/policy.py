@@ -186,14 +186,18 @@ class NetworkPlayer:
         return move
 
 
-def policy_gradient_loss(network, records, advantages, entropy_bonus=0.0):
+def policy_gradient_loss(
+    network, records, advantages, entropy_bonus=0.0, policy_weights=None
+):
     """The REINFORCE loss for recorded moves: minus the mean over them of
     advantage * log pi(move | board), less entropy_bonus times the mean
     entropy of the policy (a reward for keeping its probabilities spread
     out, so it keeps exploring).
 
     records are (board, mask, move) tuples as NetworkPlayer records them,
-    and advantages one number per record. Returns (loss, mean entropy).
+    and advantages one number per record. policy_weights, if given, scale
+    each record's term (importance weights for turned moves, see
+    symmetry.py). Returns (loss, mean entropy).
     """
     boards = torch.from_numpy(np.stack([board for board, _, _ in records]))
     masks = torch.from_numpy(np.stack([mask for _, mask, _ in records]))
@@ -201,6 +205,10 @@ def policy_gradient_loss(network, records, advantages, entropy_bonus=0.0):
     log_probs = torch.log_softmax(masked_logits(network(boards), masks), dim=1)
     taken = log_probs[torch.arange(len(records)), chosen]
     weights = torch.tensor(np.asarray(advantages), dtype=torch.float32)
+    if policy_weights is not None:
+        weights = weights * torch.tensor(
+            np.asarray(policy_weights), dtype=torch.float32
+        )
     entropy = -(log_probs.exp() * log_probs.clamp(min=-30)).sum(dim=1).mean()
     loss = -(weights * taken).mean() - entropy_bonus * entropy
     return loss, float(entropy.detach())
@@ -213,6 +221,7 @@ def actor_critic_loss(
     value_weight=0.5,
     entropy_bonus=0.0,
     detach_value=False,
+    policy_weights=None,
 ):
     """The loss with a critic (the network's value head), for recorded
     moves and each one's result z (+1, -1 or 0 for the side that made it):
@@ -223,8 +232,11 @@ def actor_critic_loss(
                - entropy_bonus * mean entropy
 
     With detach_value, the critic's loss trains only the value head, not
-    the shared convolutions. Returns (loss, mean entropy, value loss, how
-    often V's sign matched a decided result).
+    the shared convolutions. policy_weights, if given, scale each record's
+    policy term, not the critic's (importance weights for turned moves,
+    see symmetry.py: the critic's regression is valid on any board).
+    Returns (loss, mean entropy, value loss, how often V's sign matched a
+    decided result).
     """
     boards = torch.from_numpy(np.stack([board for board, _, _ in records]))
     masks = torch.from_numpy(np.stack([mask for _, mask, _ in records]))
@@ -234,6 +246,10 @@ def actor_critic_loss(
     log_probs = torch.log_softmax(masked_logits(scores, masks), dim=1)
     taken = log_probs[torch.arange(len(records)), chosen]
     advantages = targets - values.detach()
+    if policy_weights is not None:
+        advantages = advantages * torch.tensor(
+            np.asarray(policy_weights), dtype=torch.float32
+        )
     entropy = -(log_probs.exp() * log_probs.clamp(min=-30)).sum(dim=1).mean()
     value_loss = ((values - targets) ** 2).mean()
     loss = (

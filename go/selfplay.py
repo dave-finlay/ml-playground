@@ -19,6 +19,21 @@ the entropy bonus, self-play narrows
 into one style that beats its recent selves but loses to older ones
 (a 300-batch run on 5 x 5 rose and then fell below where it started).
 
+With --augment all, each move is trained on in all 8 orientations of
+the board (quarter turns and flips, see symmetry.py), with the same
+advantage: the turned game would have gone the same way, with the same
+result, so it's 8 times the examples from the same games, and it teaches
+the network that the board looks the same from every side. With
+--augment random, each move is used in one orientation chosen at random.
+Turned moves are off-policy unless the network is symmetric, so their
+policy updates are weighted by rho = pi(turned move | turned board) /
+pi(move | board), capped at --importance-cap (see symmetry.py); the
+critic learns from every orientation unweighted. The batch lines show the
+mean rho: near 1 while the network stays symmetric.
+Each test also reports how lopsided the network is (the symmetry gap:
+how differently it treats a position and its turned versions, on
+positions from random games).
+
 Win rates against itself say nothing (it always plays its equal), so
 every eval_every batches it's tested, always taking its likeliest move,
 against fixed yardsticks: the eye-aware random player, and the network
@@ -31,6 +46,8 @@ Run from the repo root:
     uv run python go/selfplay.py --init go/runs/eye-aware-5x5-seed1.pt --seed 1
     uv run python go/selfplay.py --batches 300 --save go/runs/selfplay.pt
     uv run python go/selfplay.py --resume go/runs/selfplay-resume.pt --batches 1000
+    uv run python go/selfplay.py --init go/runs/komi.pt --komi 7.5 --value \\
+        --augment all --batches 1000 --save go/runs/sym.pt --seed 1
 
 With --save, a resume file is written beside the network at every test;
 --resume carries the run on from there exactly as if it had never
@@ -61,6 +78,13 @@ from policy import (
     save_network,
     upgraded,
     with_value_head,
+)
+from symmetry import (
+    AUGMENT_MODES,
+    augmented,
+    importance_weights,
+    probe_positions,
+    symmetry_gap,
 )
 
 
@@ -206,6 +230,20 @@ def parse_args():
         help="with --value, train the critic without its loss changing the "
         "shared convolutions",
     )
+    parser.add_argument(
+        "--augment",
+        choices=AUGMENT_MODES,
+        default="none",
+        help="train on each move in all 8 orientations of the board, or one "
+        "chosen at random (default: none)",
+    )
+    parser.add_argument(
+        "--importance-cap",
+        type=float,
+        default=1.0,
+        help="with --augment, the cap on turned moves' importance weights; 0 "
+        "trains on them unweighted (default: 1)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random seed")
     parser.add_argument(
         "--resume",
@@ -275,6 +313,8 @@ def main():
             )
         args = argparse.Namespace(
             **{
+                "augment": "none",  # resume files from before --augment
+                "importance_cap": 1.0,
                 **settings,
                 "batches": args.batches,
                 "resume": args.resume,
@@ -326,6 +366,7 @@ def main():
         torch.set_rng_state(state["torch"])
         first_batch = state["batch"] + 1
     eval_seed = seed + 1_000_003
+    probes = probe_positions(args.size, args.komi, 50, 12345, network.has_colour)
 
     def write_resume(batch):
         """Save everything needed to carry on exactly from after batch."""
@@ -389,6 +430,10 @@ def main():
             )
             line += f";  vs start {100 * b:3.0f}% / {100 * w:3.0f}%"
             score = (b + w) / 2
+        policy_gap, value_gap = symmetry_gap(network, probes)
+        line += f";  gap {policy_gap:.3f}" + (
+            f" / {value_gap:.3f}" if value_gap is not None else ""
+        )
         if batch and score >= best["score"]:
             best.update(
                 score=score, batch=batch, weights=copy.deepcopy(network.state_dict())
@@ -396,7 +441,10 @@ def main():
             line += "  (best so far)"
         print(line)
 
-    print("Tests: win rates as Black / as White, always taking the likeliest move")
+    print(
+        "Tests: win rates as Black / as White, always taking the likeliest "
+        "move; symmetry gap of the policy / the value (0 is symmetric)"
+    )
     if state:
         print(
             f"Resuming {args.resume} after batch {state['batch']} (best so far: "
@@ -409,8 +457,18 @@ def main():
         f"{'batch':>5}  {'games':>6}  {'Black won':>9}  {'length':>6}  "
         f"{'entropy':>7}  pool"
         + ("  value loss, sign right" if network.has_value else "")
+        + ("   rho" if args.augment != "none" and args.importance_cap else "")
     )
     start = time.perf_counter()
+
+    def weights_for(played, records, origins):
+        """Importance weights for augmented records (None without)."""
+        if args.augment == "none" or not args.importance_cap:
+            return None
+        return importance_weights(
+            network, played, records, origins, args.importance_cap
+        )
+
     for batch in range(first_batch, args.batches + 1):
         sides, black_wins, lengths = [], [], []
         for i in range(args.games):
@@ -425,9 +483,11 @@ def main():
             black_result = first[2] if first[1] == BLACK else -first[2]
             black_wins.append(black_result > 0)
             lengths.append(sum(len(records) for records, _, _ in game_sides))
-        critic = ""
+        critic, rho = "", None
         if network.has_value:
-            records, results = moves_and_results(sides)
+            played, results = moves_and_results(sides)
+            records, results, origins = augmented(played, results, args.augment, rng)
+            rho = weights_for(played, records, origins)
             loss, entropy, value_loss, right = actor_critic_loss(
                 network,
                 records,
@@ -435,12 +495,17 @@ def main():
                 args.value_weight,
                 args.entropy_bonus,
                 args.value_detached,
+                rho,
             )
             critic = f"  {value_loss:10.3f}  {100 * right:9.0f}%"
         else:
-            records, advantages = advantages_by_colour(sides)
+            played, advantages = advantages_by_colour(sides)
+            records, advantages, origins = augmented(
+                played, advantages, args.augment, rng
+            )
+            rho = weights_for(played, records, origins)
             loss, entropy = policy_gradient_loss(
-                network, records, advantages, args.entropy_bonus
+                network, records, advantages, args.entropy_bonus, rho
             )
         optimizer.zero_grad()
         loss.backward()
@@ -452,6 +517,7 @@ def main():
                 f"{batch:5}  {batch * args.games:6}  "
                 f"{100 * np.mean(black_wins):8.0f}%  {np.mean(lengths):6.1f}  "
                 f"{entropy:7.2f}  {len(pool):4}{critic}"
+                + (f"  {np.mean(rho):5.2f}" if rho is not None else "")
             )
         if batch % args.eval_every == 0 or batch == args.batches:
             test(f"      batch {batch}", batch)

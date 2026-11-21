@@ -154,3 +154,11 @@ def test_self_play_with_komi_adds_a_colour_plane_and_records_the_komi(
     )
     assert "Adding a colour plane" in out
     assert load_network(saved).has_colour and saved_komi(saved) == 7.5
+
+
+def test_self_play_with_augmentation_runs_and_reports_the_symmetry_gap(
+    monkeypatch, capsys
+):
+    for mode in ("all", "random"):
+        out = run(monkeypatch, capsys, *SMALL, "--batches", 2, "--augment", mode)
+        assert "gap " in out and "Best: batch" in out

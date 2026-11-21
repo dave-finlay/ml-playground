@@ -517,6 +517,87 @@ With `komi.pt` (komi 7.5, which `play.py` reads from the network):
   counts) and predict the results, so search and network improve each
   other.
 
+## symmetry.py: training on every orientation of the board
+
+A Go position is worth the same turned or flipped, but the networks
+don't know it: convolutions treat a pattern alike wherever it is, not
+its mirror image. After C3 C2, `komi.pt` gives B2 an 80% prior and the
+identical D2 under 2%. `symmetry_gap` measures this: the average total
+variation distance between a network's move probabilities for a
+position and for its 7 turned versions (turned back), on positions from
+random games (0 is symmetric). A fresh network is 0.004; the first
+REINFORCE network was already 0.23, and `komi.pt` is 0.29.
+
+`selfplay.py --augment all` trains on each recorded move in all 8
+orientations (planes, legal mask and move turned together, the advantage
+unchanged); `--augment random` uses one at random. Every test now prints
+the gap.
+
+**Unweighted, it collapses.** REINFORCE's update is only right on
+average for moves turning up as often as the network would play them; a
+turned move turns up as often as the network played the original, so
+unless the network is symmetric, most of the training examples are
+off-policy. From `komi.pt`, entropy fell from 0.76 to 0.06 within 140
+batches and the network ended up losing even to eye-aware random play.
+From a fresh, symmetric network it collapsed too (entropy 2.2 to 0.3 by
+batch 300, the gap lurching to 0.59): a slight tilt is enough.
+Augmentation itself works: imitating a fixed set of moves, it cut the
+gap from 0.29 to 0.15, where plain imitation raised it to 0.40.
+
+**Weighted, it's valid but barely symmetric.** `--importance-cap`
+(default 1) weights each turned move's policy update by rho =
+pi(turned move | turned board) / pi(move | board), capped at 1
+(importance sampling, as in PPO); the critic learns from every
+orientation unweighted (plain regression, valid on any board). The
+batch lines show the mean rho. But weighting makes the turned moves count
+as often as the network would play them, which is ordinary on-policy
+REINFORCE, and that has no pull towards symmetry: as the network tilts,
+rho falls (0.99 to 0.75) and the lesson fades. From scratch with komi
+7.5 and a critic, against the same run without augmentation (same seed,
+3000 batches):
+
+| | policy gap | value gap | training time |
+|---|---|---|---|
+| no augmentation (`fresh-none`) | 0.34 | 0.10 | 37 minutes |
+| augmented, weighted (`fresh-all-last`) | 0.30 | 0.07 | 106 minutes |
+
+Head to head (400 games, random two-move openings):
+
+| | overall |
+|---|---|
+| `fresh-none` against `komi.pt` | 54% |
+| `fresh-all-last` against `komi.pt` | 58.5% |
+| `fresh-all-last` against `fresh-none` | 59.5% |
+| `fresh-all-4000-last` (1000 more batches) against `fresh-all-last` | 57% |
+| `fresh-all-4000-last` against `komi.pt` | 61% |
+| `fresh-all-4000-last` against `fresh-none` | 66.5% |
+
+So the weighted runs were the strongest yet, probably from a steadier
+gradient and a better critic rather than symmetry, and they kept
+improving where earlier continued runs drifted (the tests, 100 games
+each, looked flat throughout: head-to-heads between versions are the
+measure to trust). But the gain is modest for three times the training,
+and it doesn't touch the bot's real weaknesses. Against Dave with
+`fresh-all-4000-last`:
+
+- As Black he beat guided search (100 simulations) with near-perfect
+  play; White was lost from move 2, and the network's own value still
+  gave it about 45% to 51% with its big group about to die.
+- As White he won against 100 simulations: at move 9 the policy gave the
+  vital point E2 a prior of 0.03 (D5, played, 0.77), and 100
+  simulations never looked at it (400 do). A tactical miss.
+- As White he won against 1000 simulations: the network-guided search,
+  even at 10,000 simulations, kept Black at 78% to 86% while White made
+  a living group of 10 points that, with komi, beats Black's 15. Plain
+  search with random playouts (which count every game to the end) saw
+  it. A misjudgement of the score, which more search can't fix: it only
+  explores the value head's view more thoroughly.
+
+Verdict: a modest gain, and the wrong tool for what costs games. The
+lessons: REINFORCE can't absorb augmentation (it needs targets that are
+facts about the position), and the bot's weaknesses are reading and
+judgement, which AlphaZero's training targets.
+
 ## Tests
 
 `uv run pytest` from the repo root runs them, with the other
